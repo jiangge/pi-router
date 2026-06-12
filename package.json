@@ -1,16 +1,30 @@
 {
   "name": "pi-router",
-  "version": "0.1.0",
-  "description": "Transparent two-tier router for pi coding agent — routes channels (default) + models (opt-in fallback chain). Zero protocol coupling with pi-cache-optimizer.",
-  "main": "index.ts",
+  "version": "0.1.0-alpha.1",
+  "description": "Intelligent routing layer for pi coding agent with multi-level failover, circuit breaker, and comprehensive observability",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "INSTALL.md",
+    "CHANGELOG.md"
+  ],
   "keywords": [
     "pi",
     "pi-extension",
     "router",
     "failover",
     "multi-channel",
-    "cache-optimizer"
+    "circuit-breaker",
+    "load-balancer",
+    "llm",
+    "ai",
+    "claude",
+    "observability"
   ],
   "author": "Jiang Ge",
   "license": "MIT",
@@ -22,6 +36,9 @@
     "url": "https://github.com/jiangge/pi-router/issues"
   },
   "homepage": "https://github.com/jiangge/pi-router#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.79.0"
   },
@@ -33,6 +50,7 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

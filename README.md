@@ -2,6 +2,8 @@
 
 **Intelligent routing layer for pi (coding agent) with multi-level failover and observability.**
 
+English | [简体中文](./README.zh-CN.md)
+
 ## Features
 
 - 🔄 **L1 Channel Failover**: Same model, different providers (lan → n1-claude → run-claude)
