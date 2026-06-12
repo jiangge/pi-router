@@ -46,6 +46,12 @@ type RouterConfig = {
   contextTransfer?: "none" | "summary" | "full";  // Context transfer strategy on model switch
   summaryModel?: string;  // Model to generate summary (default: fallback model)
   summaryPrompt?: string;  // Custom summary prompt template
+  healthProbe?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    timeoutMs?: number;
+    probeMessage?: string;
+  };
 };
 
 type RouterModelConfig = {
@@ -407,6 +413,9 @@ export default function (pi: ExtensionAPI) {
   // Register router provider with mirror entries
   registerRouterProvider(pi, config, currentModels);
   
+  // Start background health probes if enabled
+  startHealthProbes(config);
+  
   console.log("[pi-router] Extension loaded (v0.1.0-alpha)");
   console.log("[pi-router] Strategy:", config.strategy ?? "channelFirst");
   console.log("[pi-router] Configured models:", config.models?.length ?? 0);
@@ -661,6 +670,33 @@ export default function (pi: ExtensionAPI) {
         }
         
         ctx.ui.notify(lines.join("\n"), "info");
+      } else if (subcommand === "probes") {
+        // Show health probe results
+        if (!healthProber.enabled) {
+          ctx.ui.notify("Health probes are disabled.\n\nTo enable, add to config:\n{\n  \"healthProbe\": {\n    \"enabled\": true\n  }\n}", "info");
+          return;
+        }
+        
+        const probes = getHealthProbeResults();
+        const lines: string[] = [
+          `Background Health Probes (interval: ${Math.floor(healthProber.intervalMs / 1000)}s):`,
+          ""
+        ];
+        
+        if (probes.length === 0) {
+          lines.push("  (no probes yet)");
+        } else {
+          const now = Date.now();
+          probes.forEach(p => {
+            const ago = Math.floor((now - p.timestamp) / 1000);
+            const icon = p.success ? "✓" : "✗";
+            const latencyStr = p.latencyMs ? ` (${p.latencyMs}ms)` : "";
+            const errorStr = p.error ? ` - ${p.error}` : "";
+            lines.push(`  ${icon} ${p.channel}${latencyStr} (${ago}s ago)${errorStr}`);
+          });
+        }
+        
+        ctx.ui.notify(lines.join("\n"), "info");
       } else {
         ctx.ui.notify(
           "pi-router v0.1.0-alpha\n\n" +
@@ -669,6 +705,7 @@ export default function (pi: ExtensionAPI) {
           "  /router list\n" +
           "  /router explain   - show failures, latency, health\n" +
           "  /router decisions - show recent routing decisions\n" +
+          "  /router probes    - show background health probes\n" +
           "  /router sync      - check models.json changes\n" +
           "  /router diff      - preview config differences\n" +
           "\nMVP in progress — full features coming in v0.2+",
@@ -1795,3 +1832,205 @@ function logDecision(decision: RoutingDecision): void {
 function getRecentDecisions(limit: number = 10): RoutingDecision[] {
   return decisionLogger.decisions.slice(-limit);
 }
+
+// ============================================================================
+// Background Health Probes (v0.2.0)
+// ============================================================================
+
+interface HealthProbeConfig {
+  enabled: boolean;
+  intervalMs: number;        // Probe interval (default: 5 minutes)
+  timeoutMs: number;         // Probe timeout (default: 10 seconds)
+  probeMessage: string;      // Simple test message
+}
+
+interface HealthProbeResult {
+  channel: string;
+  success: boolean;
+  latencyMs?: number;
+  error?: string;
+  timestamp: number;
+}
+
+const healthProber = {
+  enabled: false,
+  intervalMs: 5 * 60 * 1000,  // 5 minutes
+  timeoutMs: 10 * 1000,       // 10 seconds
+  probeMessage: "ping",
+  timers: new Map<string, NodeJS.Timeout>(),
+  lastProbe: new Map<string, HealthProbeResult>(),
+};
+
+/**
+ * Start background health probes for all channels
+ */
+function startHealthProbes(config: RouterConfig): void {
+  if (!config.healthProbe?.enabled) {
+    console.log("[pi-router] Health probes disabled");
+    return;
+  }
+  
+  healthProber.enabled = true;
+  healthProber.intervalMs = config.healthProbe.intervalMs || 5 * 60 * 1000;
+  healthProber.timeoutMs = config.healthProbe.timeoutMs || 10 * 1000;
+  healthProber.probeMessage = config.healthProbe.probeMessage || "ping";
+  
+  console.log(`[pi-router] Starting health probes (interval: ${healthProber.intervalMs}ms)`);
+  
+  // Probe all configured channels
+  for (const modelConfig of config.models) {
+    for (const channel of modelConfig.channels) {
+      const key = `${modelConfig.id}@${channel}`;
+      scheduleProbe(key, modelConfig, config);
+    }
+  }
+}
+
+/**
+ * Schedule periodic probe for a channel
+ */
+function scheduleProbe(
+  key: string,
+  modelConfig: RouterModelConfig,
+  config: RouterConfig
+): void {
+  // Clear existing timer if any
+  const existingTimer = healthProber.timers.get(key);
+  if (existingTimer) {
+    clearInterval(existingTimer);
+  }
+  
+  // Schedule periodic probe
+  const timer = setInterval(() => {
+    probeChannel(key, modelConfig, config);
+  }, healthProber.intervalMs);
+  
+  healthProber.timers.set(key, timer);
+  
+  // Run initial probe immediately
+  probeChannel(key, modelConfig, config);
+}
+
+/**
+ * Probe a single channel
+ */
+async function probeChannel(
+  key: string,
+  modelConfig: RouterModelConfig,
+  config: RouterConfig
+): Promise<void> {
+  const [modelId, channel] = key.split("@");
+  
+  // Skip if circuit breaker is open
+  if (!canAttemptChannel(modelId, channel)) {
+    console.log(`[pi-router] Skipping probe for ${key} (circuit breaker open)`);
+    return;
+  }
+  
+  console.log(`[pi-router] Probing ${key}...`);
+  
+  const startTime = Date.now();
+  
+  try {
+    // Build model map from current models
+    const currentModels = loadModelsJson();
+    const modelMap = new Map<string, PiModel>();
+    for (const model of currentModels) {
+      const key = `${model.id}@${model.provider}`;
+      modelMap.set(key, model);
+    }
+    
+    const targetModel = modelMap.get(key);
+    
+    if (!targetModel) {
+      throw new Error(`Model not found: ${key}`);
+    }
+    
+    // Create probe context
+    const probeContext: Context = {
+      messages: [
+        {
+          role: "user",
+          content: healthProber.probeMessage,
+          timestamp: Date.now(),
+        },
+      ],
+    };
+    
+    // Forward to provider with timeout
+    const stream = forwardToProvider(targetModel, probeContext, {
+      timeoutMs: healthProber.timeoutMs,
+    });
+    
+    // Wait for first event
+    let gotResponse = false;
+    for await (const event of stream) {
+      if (event.type === "text_delta" || event.type === "text_start") {
+        gotResponse = true;
+        break;
+      }
+      if (event.type === "error") {
+        throw new Error("Probe received error event");
+      }
+    }
+    
+    if (!gotResponse) {
+      throw new Error("No response from probe");
+    }
+    
+    const latencyMs = Date.now() - startTime;
+    
+    // Record success
+    healthProber.lastProbe.set(key, {
+      channel,
+      success: true,
+      latencyMs,
+      timestamp: Date.now(),
+    });
+    
+    // Update health status and circuit breaker
+    updateHealthStatus(modelId, channel, true);
+    recordCircuitOutcome(modelId, channel, true);
+    
+    console.log(`[pi-router] Probe ${key} succeeded (${latencyMs}ms)`);
+    
+  } catch (err) {
+    const latencyMs = Date.now() - startTime;
+    
+    // Record failure
+    healthProber.lastProbe.set(key, {
+      channel,
+      success: false,
+      error: String(err),
+      timestamp: Date.now(),
+    });
+    
+    // Update health status and circuit breaker
+    updateHealthStatus(modelId, channel, false);
+    recordCircuitOutcome(modelId, channel, false);
+    
+    console.error(`[pi-router] Probe ${key} failed (${latencyMs}ms):`, err);
+  }
+}
+
+/**
+ * Stop all background health probes
+ */
+function stopHealthProbes(): void {
+  console.log("[pi-router] Stopping health probes");
+  
+  for (const timer of healthProber.timers.values()) {
+    clearInterval(timer);
+  }
+  
+  healthProber.timers.clear();
+  healthProber.enabled = false;
+}
+
+/**
+ * Get health probe results
+ */
+function getHealthProbeResults(): HealthProbeResult[] {
+  return Array.from(healthProber.lastProbe.values());
+}
+
