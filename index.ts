@@ -850,17 +850,16 @@ async function generateContextSummary(
   promptTemplate: string,
   _pi: any
 ): Promise<SummaryResult> {
-  try {
-    // Build conversation context
-    const conversationText = messages
-      .map((m, idx) => {
-        const role = m.role || "unknown";
-        const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-        return `[${idx + 1}] ${role}: ${content}`;
-      })
-      .join("\n\n");
-    
-    const summaryPrompt = `${promptTemplate}
+  // Build conversation context (outside try block so it's accessible in catch)
+  const conversationText = messages
+    .map((m, idx) => {
+      const role = m.role || "unknown";
+      const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+      return `[${idx + 1}] ${role}: ${content}`;
+    })
+    .join("\n\n");
+  
+  const summaryPrompt = `${promptTemplate}
 
 ---
 
@@ -871,7 +870,8 @@ ${conversationText}
 ---
 
 Provide the summary now:`;
-    
+  
+  try {
     console.log("[pi-router] Generating context summary...");
     console.log(`[pi-router] From: ${fromModel.id}@${fromModel.provider}`);
     console.log(`[pi-router] To: ${toModel.id}@${toModel.provider}`);
@@ -937,22 +937,137 @@ Provide the summary now:`;
       tokensUsed,
     };
   } catch (err) {
-    console.error("[pi-router] Failed to generate summary:", err);
+    console.error("[pi-router] Failed to generate summary with summaryModel:", err);
+    console.log("[pi-router] Trying fallback: use target model for summary...");
     
-    // Fallback: return a simple summary
-    const fallbackSummary = `[Context Transfer Summary]
-Previous model: ${fromModel.id}
-Conversation length: ${messages.length} messages
-
-The user was working on a task that requires continuation with the new model ${toModel.id}.`;
+    // Fallback strategy 1: Try using the target model (toModel) itself
+    try {
+      const targetModelResult = await generateSummaryWithModel(toModel, summaryPrompt);
+      console.log(`[pi-router] Summary generated with target model: ${targetModelResult.summary.length} chars`);
+      return targetModelResult;
+    } catch (fallbackErr) {
+      console.error("[pi-router] Target model also failed:", fallbackErr);
+      console.log("[pi-router] Using simple text-based summary (no AI)...");
+    }
+    
+    // Fallback strategy 2: Simple text-based summary (no AI required)
+    const simpleSummary = generateSimpleTextSummary(messages, fromModel, toModel);
     
     return {
       success: false,
-      summary: fallbackSummary,
+      summary: simpleSummary,
       tokensUsed: 0,
       error: String(err),
     };
   }
+}
+
+/**
+ * Helper function to generate summary using a specific model
+ */
+async function generateSummaryWithModel(
+  model: PiModel,
+  summaryPrompt: string
+): Promise<SummaryResult> {
+  // Convert PiModel to pi-ai Model format
+  const realModel: Model<Api> = {
+    id: model.id,
+    provider: model.provider,
+    api: model.api as Api,
+    name: model.id,
+    baseUrl: "",
+    input: ["text"],
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    contextWindow: 128000,
+    maxTokens: 8192,
+    compat: model.compat,
+    reasoning: model.reasoning,
+  };
+  
+  // Create context for summary request
+  const summaryContext: Context = {
+    messages: [
+      {
+        role: "user",
+        content: summaryPrompt,
+        timestamp: Date.now(),
+      },
+    ],
+  };
+  
+  // Call streamSimple to generate summary
+  const stream = streamSimple(realModel, summaryContext, undefined);
+  
+  // Collect the response
+  let summary = "";
+  let tokensUsed = 0;
+  
+  for await (const event of stream) {
+    if (event.type === "text_delta") {
+      summary += event.delta;
+    } else if (event.type === "done") {
+      tokensUsed = Math.ceil(summary.length / 4);
+    }
+  }
+  
+  if (!summary || summary.trim().length === 0) {
+    throw new Error("Summary generation returned empty response");
+  }
+  
+  return {
+    success: true,
+    summary: summary.trim(),
+    tokensUsed,
+  };
+}
+
+/**
+ * Generate simple text-based summary (no AI required)
+ * 
+ * This is the ultimate fallback when no AI model is available.
+ * Extracts key information from the conversation without using AI.
+ */
+function generateSimpleTextSummary(
+  messages: any[],
+  fromModel: PiModel,
+  toModel: PiModel
+): string {
+  const userMessages = messages.filter(m => m.role === "user");
+  const assistantMessages = messages.filter(m => m.role === "assistant");
+  
+  // Extract last user message (current task)
+  const lastUserMessage = userMessages[userMessages.length - 1];
+  const lastUserContent = lastUserMessage
+    ? (typeof lastUserMessage.content === "string"
+        ? lastUserMessage.content
+        : JSON.stringify(lastUserMessage.content))
+    : "(no user message)";
+  
+  // Truncate if too long
+  const truncatedContent = lastUserContent.length > 500
+    ? lastUserContent.substring(0, 500) + "..."
+    : lastUserContent;
+  
+  // Build simple summary
+  const lines = [
+    "[Context Transfer Summary - Simple Mode]",
+    "",
+    `Switching from: ${fromModel.id}@${fromModel.provider}`,
+    `Switching to: ${toModel.id}@${toModel.provider}`,
+    `Conversation: ${messages.length} messages (${userMessages.length} user, ${assistantMessages.length} assistant)`,
+    "",
+    "Latest user request:",
+    truncatedContent,
+    "",
+    "Note: AI-powered summary unavailable. This is a basic text extraction.",
+  ];
+  
+  return lines.join("\n");
 }
 
 /**
@@ -1106,6 +1221,7 @@ function registerRouterProvider(
   
   // Register with custom streamSimple handler
   pi.registerProvider("router", {
+    api: "custom" as Api,  // Add required api field
     models: mirrorModels,
     streamSimple: (model: any, context: any, options?: any) => {
       return routeRequest(model, context, options, config, modelMap, pi);
