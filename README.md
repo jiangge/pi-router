@@ -1,177 +1,240 @@
 # pi-router
 
-Transparent two-tier router for [pi coding agent](https://github.com/badlogic/pi-mono) — routes **channels** first (same model across providers), with an opt-in **model fallback chain** when exhausted.
+**Intelligent routing layer for pi (coding agent) with multi-level failover and observability.**
 
-> **auto-router routes models** (task → best model via intent/budget/quota);  
-> **pi-router routes channels** (model → best channel, with model fallback when all channels fail).
+## Features
 
-## Why pi-router
+- 🔄 **L1 Channel Failover**: Same model, different providers (lan → n1-claude → run-claude)
+- 🎯 **L2 Model Fallback**: Cross-model failover with context transfer (opus → sonnet → gemini)
+- 🧠 **Smart Routing**: Latency-based, cost-based, capability-based channel selection
+- 🛡️ **Circuit Breaker**: Fast-fail for broken channels with automatic recovery
+- 📊 **Observability**: Decision logging, latency tracking, health monitoring
+- 💾 **Sticky Mode**: Cache preservation by preferring last successful channel
+- ⏱️ **Cooldown**: Prevent retry storms after failures
 
-- **Real model identity end-to-end** — no virtual names, no globalThis bridge protocol. Extensions like [pi-cache-optimizer](https://github.com/jiangge/pi-cache-optimizer) work out of the box (adapter selection, footer stats, compat warnings, prompt optimization, cache keys).
-- **Flexible routing strategies** — `channelFirst` (default, preserve model identity) or `modelFirst` (cost/capability optimized failover chain).
-- **Sticky failover (cache-aware)** — fallback to a backup channel/model, stick with it to build cache, health-check the primary in background, switch back at turn boundary (not mid-request).
-- **Smart model sorting** — built-in capability scores + reference pricing for auto-ranking (cost-first or capability-first), with full manual override.
-- **Model fallback chain** — when all channels for `claude-opus-4-8` fail, optionally fall back to `claude-sonnet-4-6` or `gemini-3-pro`. User choice: `inline` (same request) or `switch` (session-level via `ctx.setModel`, zero stats pollution).
+## Quick Start
 
-## Status
-
-**v0.1.0-alpha** — MVP in progress (planning → implementation).
-
-- [x] PRD complete
-- [x] Technical foundations verified (pi 0.79.1 source)
-- [ ] MVP: mirror registration + L1 channel failover + cooldown + commands + auto-sync detection + context transfer (summary mode)
-- [ ] v0.2: latency ranking, circuit breaker, L2 model fallback chain, sticky + health-check primary, decision logger
-- [ ] v0.3: inline fallback mode, overflow trigger, channel budget/quota, `@channel` shortcuts, intent suggest/auto modes, context transfer (full mode with advanced sanitization)
-
-## Install (when published)
+### 1. Install
 
 ```bash
-pi install npm:pi-router
+cd /home/jiang/jiang/source/pi-router
+npm install
+npm run build
 ```
 
-## Quick start (will be)
+### 2. Configure
 
-1. Config file at `~/.pi/agent/pi-router.json` (optional — auto-discovery works without config):
+Edit `~/.pi/agent/pi-router.json`:
 
-**Strategy 1: channelFirst (default)** — Preserve model identity, exhaust all channels before switching models
-
-```jsonc
+```json
 {
-  "strategy": "channelFirst",  // default
-  "auto": true,  // auto-discover same-id-multi-channel models from models.json
-  "contextTransfer": "summary",  // none | summary (default) | full
-  "models": [{
-    "id": "claude-opus-4-8",
-    "channels": ["lan", "n1-claude", "run-claude"],
-    "sortBy": "config",  // config | latency | cost
-    "failover": { "on": ["connect", "429", "5xx", "timeout"], "cooldownMs": 60000 },
-    "fallbackModels": [
-      { "id": "claude-sonnet-4-6", "channels": ["lan"] },
-      { "id": "gemini-3-pro", "channels": ["google"] }
-    ],
-    "fallbackMode": "switch",  // switch (default, zero stats pollution) | inline (micro pollution)
-    "sticky": true
-  }]
-}
-```
-
-**Strategy 2: modelFirst** — Single-layer flat chain, all model+channel combinations in order
-
-```jsonc
-{
-  "strategy": "modelFirst",
-  "sortBy": "capabilityFirst",  // capabilityFirst | costFirst | manual
+  "strategy": "channelFirst",
+  "auto": true,
+  "sticky": true,
+  "contextTransfer": "summary",
+  "sortBy": "latency",
   "models": [
-    { "id": "claude-opus-4-8", "channels": ["lan", "n1-claude"] },
-    { "id": "gpt-5.5", "channels": ["hyb-gpt"] },
-    { "id": "claude-sonnet-4-6", "channels": ["lan"] },
-    { "id": "gemini-3-pro", "channels": ["google"] }
-  ],
-  "failover": { "on": ["connect", "429", "5xx", "timeout"], "cooldownMs": 60000 },
-  "sticky": true
+    {
+      "id": "claude-opus-4-8",
+      "channels": ["lan", "n1-claude", "run-claude"],
+      "fallbackModels": [
+        { "id": "claude-sonnet-4-6", "channels": ["lan"] }
+      ]
+    }
+  ]
 }
 ```
 
-**Smart sorting modes (modelFirst only):**
-- `capabilityFirst` — Uses built-in capability scores (Opus 4.8: 95, GPT-5.5: 98, Sonnet 4.6: 85)
-- `costFirst` — Ranks by weighted cost (input + output + cache reads + cache writes), uses reference pricing when `models.json` cost is 0/missing
-- `manual` — User-defined order from config
+### 3. Use
 
-Router auto-generates recommended config on first run, user can accept or customize.
+In pi, select a router model:
 
-**Auto-sync with models.json:**
-- Detects new/removed/modified channels and models from `models.json`
-- Prompts user to confirm config updates (interactive TUI)
-- User can accept all, accept selected, or keep current config
-- Diff view shows: new channels (green), removed channels (red), modified models (yellow)
+```
+Model: router/claude-opus-4-8
+```
 
-**Context transfer on model switch:**
-- `none` - No context transfer, fresh start (fast but loses history)
-- `summary` (default) - AI-generated conversation summary (~500 tokens, maintains continuity)
-- `full` - Transfer all messages with compat sanitization (preserves full context)
+Pi-router will automatically:
+- Try channels in order (with smart sorting)
+- Failover on errors
+- Apply circuit breaker and cooldowns
+- Fall back to alternative models if needed
+- Track performance and health
 
-When switching models (e.g., `claude-opus-4-8` → `claude-sonnet-4-6`), the router generates a concise summary of:
-1. User's main goal/task
-2. Key decisions made  
-3. Current progress/status
-4. Important context for the next model
+## Commands
 
-This ensures the fallback model understands the conversation flow without cache fragmentation.
+```
+/router status       # Show current config
+/router list         # List available models
+/router explain      # Show failures, latency, health, circuits
+/router decisions    # Show recent routing decisions
+/router sync         # Check for model changes
+/router sync accept  # Apply detected changes
+```
 
-2. `/reload` in pi
-3. Select `router/claude-opus-4-8` from `/model`
-4. Check status: `/router status`, `/router explain`
+## How It Works
 
-## Commands (planned)
+```
+User Request: router/claude-opus-4-8
+    ↓
+Router Intercepts
+    ↓
+Try channels: lan → n1-claude → run-claude
+├─ Check cooldown
+├─ Check circuit breaker
+├─ Forward to real provider
+└─ On error: record, try next
+    ↓
+All L1 failed? Try L2 fallback
+├─ Generate context summary
+├─ Sanitize for compatibility
+└─ Forward to claude-sonnet-4-6@lan
+    ↓
+Stream events to user
+├─ Record latency on first event
+├─ Update health status
+└─ Log routing decision
+```
 
-- `/router` — interactive menu or help
-- `/router status` — current model, active channel, health
-- `/router list` — all mirror entries + per-channel latency
-- `/router explain [modelId]` — last routing decision
-- `/router switch <modelId>` — manual channel/model switch
-- `/router sync` — check models.json changes, prompt for config update
-- `/router diff` — preview models.json vs current config differences
+## Key Concepts
+
+### Sticky Mode
+
+Prefer last successful channel to maximize cache hits:
+
+```
+Request 1: lan (success) → sticky = lan
+Request 2: Try lan first (cache hit!)
+Request 3: lan fails → try n1-claude → sticky = n1-claude
+Request 4: Try n1-claude first (cache preserved)
+```
+
+### Circuit Breaker
+
+Fast-fail for broken channels:
+
+```
+Failures: 0 → 1 → 2 → 3 → 4 → 5 (OPEN)
+    ↓
+Block requests for 2 minutes
+    ↓
+Half-open: Allow 1 test request
+    ↓
+Success? → CLOSED (reset)
+Failure? → OPEN (another 2 minutes)
+```
+
+### Context Transfer
+
+When switching models (L2 fallback):
+
+1. **Summary mode**: AI summarizes conversation (~500 tokens)
+2. **Sanitize**: Handle system message / role incompatibilities
+3. **Forward**: Use modified context with fallback model
+
+## Observability
+
+### /router explain
+
+```
+Active Channels:
+  claude-opus-4-8 → lan
+
+Active Cooldowns:
+  claude-opus-4-8@n1-claude: 45s remaining
+
+Recent Failures:
+  claude-opus-4-8@n1-claude (52s ago): Connection timeout
+
+Channel Latency (avg last 10):
+  claude-opus-4-8@lan: 523ms (10 samples)
+  claude-opus-4-8@n1-claude: 1247ms (8 samples)
+
+Channel Health:
+  claude-opus-4-8@lan: ✓ healthy (checked 5s ago)
+  claude-opus-4-8@n1-claude: ✗ unhealthy (3 failures)
+
+Circuit Breakers:
+  🔴 opus@n1-claude: open (5 failures, retry in 87s)
+```
+
+### /router decisions
+
+```
+Recent Routing Decisions (last 20):
+
+claude-opus-4-8 -> lan (523ms) (12s ago)
+  Strategy: sticky | first choice
+
+claude-opus-4-8 -> run-claude (1847ms) (45s ago)
+  Strategy: sticky | failover after 2 failures
+  Tried: lan -> n1-claude -> run-claude
+```
+
+## Configuration Reference
+
+### Global Options
+
+```json
+{
+  "strategy": "channelFirst",     // Routing strategy
+  "auto": true,                   // Auto-sync models.json changes
+  "sticky": true,                 // Prefer last successful channel
+  "contextTransfer": "summary",   // "none" | "full" | "summary"
+  "sortBy": "latency",            // "config" | "latency" | "cost"
+  "summaryPrompt": "...",         // Custom summary prompt
+  "failover": {
+    "cooldownMs": 60000           // Cooldown duration (default 60s)
+  }
+}
+```
+
+### Per-Model Options
+
+```json
+{
+  "id": "claude-opus-4-8",
+  "channels": ["lan", "n1-claude", "run-claude"],
+  "sticky": true,                 // Override global sticky
+  "sortBy": "latency",            // Override global sortBy
+  "contextTransfer": "summary",   // Override global contextTransfer
+  "fallbackModels": [
+    {
+      "id": "claude-sonnet-4-6",
+      "channels": ["lan", "run-claude"]
+    }
+  ],
+  "failover": {
+    "cooldownMs": 30000           // Override global cooldown
+  }
+}
+```
 
 ## Architecture
 
-**Strategy 1: channelFirst (two-tier)**
-```
-router/claude-opus-4-8     ← mirror entry (real id/name/compat from primary channel)
-  L1 (channels):  lan → n1-claude → run-claude
-  L2 (models):    claude-sonnet-4-6(lan) → gemini-3-pro(google)
-```
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed design documentation.
 
-**Strategy 2: modelFirst (single-tier flat chain)**
-```
-router/auto-ranked     ← mirror entry (dynamic model selection)
-  L1 (flat): claude-opus-4-8@lan → claude-opus-4-8@n1-claude → 
-             gpt-5.5@hyb-gpt → claude-sonnet-4-6@lan → gemini-3-pro@google
-```
+## Development Status
 
-**Provider registration:** `router` (models display as `router/claude-opus-4-8` or `router/auto-ranked`)  
-**streamSimple:** forward via pi-ai `streamSimple(realModel, context, options)` with `options` preserved → `sessionId` → correct `prompt_cache_key` + session-affinity headers, zero bridge needed.
+**v0.1.0-alpha** - Core features complete:
+- ✅ L1 channel failover
+- ✅ L2 model fallback
+- ✅ Circuit breaker
+- ✅ Latency tracking
+- ✅ Health monitoring
+- ✅ Decision logging
+- ✅ Full command set
 
-**Built-in intelligence:**
-- **Capability scores:** Claude Opus 4.8: 95, GPT-5.5: 98, Sonnet 4.6: 85, Gemini 3 Pro: 90, Haiku 4.5: 75, etc.
-- **Reference pricing:** Official API + third-party platform pricing (Anthropic, OpenAI, Google, run.ai, siliconflow, etc.)
-- **Cost calculation:** `weighted_cost = (input_tokens × input_price) + (output_tokens × output_price) + (cache_reads × cache_read_price) + (cache_writes × cache_write_price)` with typical token distribution weights
-- **Context transfer:** AI-generated conversation summaries on model switch to maintain continuity without cache fragmentation
-
-## Roadmap
-
-See [PRD](https://github.com/jiangge/pi-cache-optimizer/tree/master/.trellis/tasks/06-12-pi-router-transparent-two-tier-router-extension/prd.md) for full design.
-
-- **v0.1 (MVP)**: mirror registration (auto-discovery), L1 channel failover, cooldown, context sanitizer, status bar, basic commands
-- **v0.2**: latency ranking, circuit breaker (closed→open→half-open), L2 model fallback chain (switch mode), sticky + health-check primary, decision logger
-- **v0.3**: inline fallback mode, overflow trigger, channel budget/quota, `@channel` shortcuts, intent suggest/auto modes
-
-## Comparison with auto-router
-
-| | auto-router | pi-router (channelFirst) | pi-router (modelFirst) |
-|---|---|---|---|
-| **Routes** | Different models per request | **Channels first** (lan → n1 → run), models second (opt-in) | **Pre-configured failover chain** (fixed order) |
-| **Model identity** | Virtual (e.g. `subscription-reasoning`) | **Real** (`router/claude-opus-4-8`) | **Real** (`router/auto-ranked`) |
-| **Selection logic** | Every-request AI decision (intent/budget/quota) | Channel health + model fallback | **Pre-sorted chain** (cost/capability) |
-| **pi-cache-optimizer compat** | Requires globalThis bridge protocol | **Zero protocol** (works out of box) | **Zero protocol** (works out of box) |
-| **Cache stability** | Every-request re-decision → cache fragmentation | **Sticky by default** (build cache on fallback target) | **Sticky by default** |
-| **Use case** | Smart model selection (context-aware) | **Channel resilience + model identity** | **Static failover chain (budget/capability)** |
-
-All three can coexist:
-- **auto-router**: AI-powered model selection per request
-- **pi-router channelFirst**: Same model, multiple channels, preserve identity
-- **pi-router modelFirst**: Predetermined failover chain, cost or capability optimized
-
-## Technical notes
-
-All chain links verified against pi 0.79.1 source:
-- `registerProvider` model entries preserve `compat`/`thinkingLevelMap`/`reasoning`/`contextWindow`/`cost` (model-registry.js:741-762)
-- pi core injects `sessionId` into `streamSimple` options (sdk.js:216)
-- Forwarding with `options` preserved → `prompt_cache_key` / session-affinity headers automatic (openai-completions.js:394-396, sdk.js:195)
-- Optimized system prompt already in `context.systemPrompt` (pi-ai types.d.ts:245, agent-session.js:811)
-- Extension can resolve any real channel credentials via `ctx.modelRegistry.getApiKeyAndHeaders(model)` (model-registry.js:570)
-- Extension can switch active model via `ctx.setModel(model)` (extensions/types.d.ts:889)
-- AssistantMessage's provider/model/api filled by real called provider (pi-ai anthropic.js:288-290)
+**v0.2.0** - Planned:
+- Background health probes
+- Per-channel pricing
+- Real AI summary generation
+- Decision analytics
+- Unit tests
 
 ## License
 
 MIT
+
+## Credits
+
+Built with [pi coding agent](https://github.com/pi-agi/pi-coding-agent) extension API.

@@ -697,7 +697,7 @@ async function generateContextSummary(
   toModel: PiModel,
   summaryModel: PiModel,
   promptTemplate: string,
-  pi: any
+  _pi: any
 ): Promise<SummaryResult> {
   try {
     // Build conversation context
@@ -920,7 +920,7 @@ function routeRequest(
   options: SimpleStreamOptions | undefined,
   config: RouterConfig,
   modelMap: Map<string, PiModel>,
-  pi: any
+  _pi: any
 ): AssistantMessageEventStream {
   const modelId = routerModel.id;
   const modelConfig = config.models?.find(m => m.id === modelId);
@@ -1265,7 +1265,7 @@ async function tryL2ModelFallback(
   config: RouterConfig,
   modelConfig: RouterModelConfig,
   modelMap: Map<string, PiModel>,
-  pi: any,
+  _pi: any,
   eventStream: AssistantMessageEventStream
 ): Promise<void> {
   const fallbackModels = modelConfig.fallbackModels || [];
@@ -1319,7 +1319,7 @@ async function tryL2ModelFallback(
           targetModel,
           summaryModel,
           config.summaryPrompt || DEFAULT_SUMMARY_PROMPT,
-          pi
+          _pi
         );
         
         if (summaryResult.success && summaryResult.summary) {
