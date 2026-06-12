@@ -950,7 +950,17 @@ function createFailoverStream(
     let stream = tryNextChannel();
     
     if (!stream) {
-      eventStream.end();
+      // All L1 channels failed, try L2 model fallback
+      await tryL2ModelFallback(
+        modelId,
+        context,
+        options,
+        config,
+        modelConfig,
+        modelMap,
+        null, // pi reference not needed for now
+        eventStream
+      );
       return;
     }
     
@@ -970,7 +980,17 @@ function createFailoverStream(
       stream = tryNextChannel();
       
       if (!stream) {
-        eventStream.end();
+        // All L1 channels exhausted, try L2 model fallback
+        await tryL2ModelFallback(
+          modelId,
+          context,
+          options,
+          config,
+          modelConfig,
+          modelMap,
+          null,
+          eventStream
+        );
         return;
       }
       
@@ -982,7 +1002,17 @@ function createFailoverStream(
         eventStream.end();
       } catch (err2) {
         console.error(`[pi-router] Secondary stream error:`, err2);
-        eventStream.end();
+        // Try L2 fallback as last resort
+        await tryL2ModelFallback(
+          modelId,
+          context,
+          options,
+          config,
+          modelConfig,
+          modelMap,
+          null,
+          eventStream
+        );
       }
     }
   })();
@@ -1017,4 +1047,123 @@ function recordFailure(
   routerState.cooldowns.set(key, Date.now() + cooldownMs);
   
   console.log(`[pi-router] Applied ${cooldownMs}ms cooldown to ${key}`);
+}
+
+/**
+ * Try L2 model fallback when all L1 channels exhausted
+ */
+async function tryL2ModelFallback(
+  modelId: string,
+  context: Context,
+  options: SimpleStreamOptions | undefined,
+  config: RouterConfig,
+  modelConfig: RouterModelConfig,
+  modelMap: Map<string, PiModel>,
+  pi: any,
+  eventStream: AssistantMessageEventStream
+): Promise<void> {
+  const fallbackModels = modelConfig.fallbackModels || [];
+  
+  if (fallbackModels.length === 0) {
+    console.log(`[pi-router] No fallback models configured for ${modelId}`);
+    eventStream.end();
+    return;
+  }
+  
+  console.log(`[pi-router] L1 channels exhausted, trying L2 model fallback...`);
+  
+  for (const fallbackSpec of fallbackModels) {
+    console.log(`[pi-router] Attempting fallback to ${fallbackSpec.id}...`);
+    
+    // Find the fallback model
+    const fallbackChannels = fallbackSpec.channels;
+    let fallbackStream: AssistantMessageEventStream | null = null;
+    
+    for (const channel of fallbackChannels) {
+      const key = `${fallbackSpec.id}@${channel}`;
+      const targetModel = modelMap.get(key);
+      
+      if (!targetModel) {
+        console.warn(`[pi-router] Fallback model not found: ${key}`);
+        continue;
+      }
+      
+      // Get primary model for context transfer
+      const primaryKey = `${modelId}@${modelConfig.channels[0]}`;
+      const primaryModel = modelMap.get(primaryKey);
+      
+      if (!primaryModel) {
+        console.warn(`[pi-router] Primary model not found for context transfer: ${primaryKey}`);
+        continue;
+      }
+      
+      // Determine context transfer strategy
+      const transferStrategy = modelConfig.contextTransfer || config.contextTransfer || "summary";
+      
+      // Sanitize context for model switch
+      let modifiedContext = context;
+      
+      if (transferStrategy === "summary") {
+        // Generate summary
+        console.log(`[pi-router] Generating context summary for model switch...`);
+        const summaryModel = targetModel; // Use fallback model to generate summary
+        const summaryResult = await generateContextSummary(
+          context.messages || [],
+          primaryModel,
+          targetModel,
+          summaryModel,
+          config.summaryPrompt || DEFAULT_SUMMARY_PROMPT,
+          pi
+        );
+        
+        if (summaryResult.success && summaryResult.summary) {
+          modifiedContext = sanitizeContextForSwitch(
+            context,
+            primaryModel,
+            targetModel,
+            transferStrategy,
+            summaryResult.summary
+          );
+          console.log(`[pi-router] Context summary generated (${summaryResult.tokensUsed || 0} tokens)`);
+        } else {
+          console.warn(`[pi-router] Summary generation failed, using full context`);
+          modifiedContext = sanitizeContextForSwitch(
+            context,
+            primaryModel,
+            targetModel,
+            "full"
+          );
+        }
+      } else if (transferStrategy === "none" || transferStrategy === "full") {
+        modifiedContext = sanitizeContextForSwitch(
+          context,
+          primaryModel,
+          targetModel,
+          transferStrategy
+        );
+      }
+      
+      // Try to forward to fallback model
+      try {
+        console.log(`[pi-router] Forwarding to fallback ${key}...`);
+        fallbackStream = forwardToProvider(targetModel, modifiedContext, options);
+        
+        // Forward events
+        for await (const event of fallbackStream) {
+          eventStream.push(event);
+        }
+        
+        eventStream.end();
+        console.log(`[pi-router] Successfully failed over to ${key}`);
+        return;
+      } catch (err) {
+        console.error(`[pi-router] Fallback failed on ${key}:`, err);
+        // Continue to next channel/model
+      }
+    }
+  }
+  
+  // All fallback attempts exhausted
+  console.error(`[pi-router] All L1 and L2 fallback attempts exhausted for ${modelId}`);
+  eventStream.end();
 }
