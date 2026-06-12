@@ -6,8 +6,8 @@ English | [简体中文](./README.zh-CN.md)
 
 ## Features
 
-- 🔄 **L1 Channel Failover**: Same model, different providers (lan → n1-claude → run-claude)
-- 🎯 **L2 Model Fallback**: Cross-model failover with context transfer (opus → sonnet → gemini)
+- 🔄 **Channel Failover**: Same model, different providers (lan → n1-claude → run-claude)
+- 🎯 **Model Fallback**: Cross-model failover with context transfer (opus → sonnet → gemini)
 - 🧠 **Smart Routing**: Latency-based, cost-based, capability-based channel selection
 - 🛡️ **Circuit Breaker**: Fast-fail for broken channels with automatic recovery
 - 📊 **Observability**: Decision logging, latency tracking, health monitoring
@@ -88,7 +88,7 @@ Try channels: lan → n1-claude → run-claude
 ├─ Forward to real provider
 └─ On error: record, try next
     ↓
-All L1 failed? Try L2 fallback
+All L1 failed? Try model fallback
 ├─ Generate context summary
 ├─ Sanitize for compatibility
 └─ Forward to claude-sonnet-4-6@lan
@@ -129,7 +129,7 @@ Failure? → OPEN (another 2 minutes)
 
 ### Context Transfer
 
-When switching models (L2 fallback):
+When switching models (model fallback):
 
 1. **Summary mode**: AI summarizes conversation (~500 tokens)
 2. **Sanitize**: Handle system message / role incompatibilities
@@ -238,8 +238,8 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed design documentation.
 - ✅ Enhanced observability
 
 **v0.1.0-alpha** - Core features complete:
-- ✅ L1 channel failover
-- ✅ L2 model fallback
+- ✅ channel failover
+- ✅ model fallback
 - ✅ Circuit breaker
 - ✅ Latency tracking
 - ✅ Health monitoring

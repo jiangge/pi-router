@@ -83,14 +83,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Real provider forwarding via `@earendil-works/pi-ai`
 - Async failover stream with seamless channel switching
 
-#### L1 Channel Failover
+#### Channel Failover
 - Same model, different providers (lan → n1-claude → run-claude)
 - Stream-level error catching and failover
 - Cooldown mechanism (60s default, configurable)
 - Sticky mode for cache preservation
 - Circuit breaker with fast-fail (5 failures → 2min cooldown)
 
-#### L2 Model Fallback
+#### Model Fallback
 - Cross-model failover with context transfer
 - Three transfer modes: none / full / summary
 - AI-generated conversation summaries (~500 tokens)
@@ -193,7 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History Summary
 
-- **v0.1.0-alpha** (2026-06-12): Initial release with full L1/L2 failover stack
+- **v0.1.0-alpha** (2026-06-12): Initial release with full channel/model failover stack
 - **v0.2.0** (planned): Background probes, tests, strict types, analytics
 
 ---
@@ -206,8 +206,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 3. Auto-discovery from models.json
 4. Multi-channel model grouping
 5. Context sanitization for model switching
-6. L1 channel failover with real provider forwarding
-7. L2 model fallback with context transfer
+6. channel failover with real provider forwarding
+7. model fallback with context transfer
 8. Smart channel sorting (latency/cost/capability)
 9. Circuit breaker and decision logger
 10. Latency tracking and health monitoring

@@ -67,7 +67,7 @@ See `examples/router.config.json` for all available options.
 - Routes to first channel
 - Decision logged with channel name
 
-### Scenario 2: L1 Channel Failover
+### Scenario 2: Channel Failover
 
 **Setup:**
 - Configure model with channels: `["unavailable", "working"]`
@@ -101,7 +101,7 @@ See `examples/router.config.json` for all available options.
 - Circuit closes after cooldown
 - Channel retried after recovery
 
-### Scenario 4: L2 Model Fallback
+### Scenario 4: Model Fallback
 
 **Setup:**
 ```json
@@ -121,11 +121,11 @@ See `examples/router.config.json` for all available options.
 
 **Test:**
 1. Send a prompt
-2. Watch L1 failure → L2 fallback
+2. Watch L1 failure → model fallback
 3. Check decisions
 
 **Expected:**
-- All L1 channels fail
+- All channels fail
 - Fallback to L2 model
 - Decision shows fallback used
 
@@ -278,8 +278,8 @@ See `examples/router.config.json` for all available options.
 The extension logs to console with `[pi-router]` prefix. Watch for:
 - `Extension loaded` on startup
 - `Routing decision` on each prompt
-- `L1 failover` on channel failures
-- `L2 fallback` on model fallbacks
+- `channel failover` on channel failures
+- `model fallback` on model fallbacks
 
 ### Check Configuration
 
@@ -386,8 +386,8 @@ time echo "2+2?" | pi -p
 ### Failover Latency
 
 Measure time from first failure to second attempt:
-- Expected: <100ms for L1 failover
-- Expected: <200ms for L2 fallback (with summary)
+- Expected: <100ms for channel failover
+- Expected: <200ms for model fallback (with summary)
 
 ## Success Criteria
 

@@ -1432,8 +1432,8 @@ function createFailoverStream(
     let stream = tryNextChannel();
     
     if (!stream) {
-      // All L1 channels failed, try L2 model fallback
-      await tryL2ModelFallback(
+      // All channels failed, try fallback model
+      await tryModelFallback(
         modelId,
         context,
         options,
@@ -1483,8 +1483,8 @@ function createFailoverStream(
       stream = tryNextChannel();
       
       if (!stream) {
-        // All L1 channels exhausted, try L2 model fallback
-        await tryL2ModelFallback(
+        // All channels exhausted, try fallback model
+        await tryModelFallback(
           modelId,
           context,
           options,
@@ -1528,8 +1528,8 @@ function createFailoverStream(
         if (currentChannel) {
           updateHealthStatus(modelId, currentChannel, false);
         }
-        // Try L2 fallback as last resort
-        await tryL2ModelFallback(
+        // Try model fallback as last resort
+        await tryModelFallback(
           modelId,
           context,
           options,
@@ -1576,9 +1576,9 @@ function recordFailure(
 }
 
 /**
- * Try L2 model fallback when all L1 channels exhausted
+ * Try fallback model when all channels exhausted
  */
-async function tryL2ModelFallback(
+async function tryModelFallback(
   modelId: string,
   context: Context,
   options: SimpleStreamOptions | undefined,
@@ -1596,7 +1596,7 @@ async function tryL2ModelFallback(
     return;
   }
   
-  console.log(`[pi-router] L1 channels exhausted, trying L2 model fallback...`);
+  console.log(`[pi-router] All channels exhausted, trying fallback model...`);
   
   for (const fallbackSpec of fallbackModels) {
     console.log(`[pi-router] Attempting fallback to ${fallbackSpec.id}...`);
@@ -1690,7 +1690,7 @@ async function tryL2ModelFallback(
   }
   
   // All fallback attempts exhausted
-  console.error(`[pi-router] All L1 and L2 fallback attempts exhausted for ${modelId}`);
+  console.error(`[pi-router] All channel and model fallback attempts exhausted for ${modelId}`);
   eventStream.end();
 }
 

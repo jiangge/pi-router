@@ -3,8 +3,8 @@
 ## Overview
 
 Pi-Router is a **production-grade intelligent routing layer** for pi (coding agent) that provides:
-- **L1 Channel Failover**: Same model, different providers (lan, n1-claude, run-claude, etc.)
-- **L2 Model Fallback**: Different models with context transfer (opus → sonnet → gemini)
+- **Channel Failover (channelFirst)**: Same model, different providers (lan, n1-claude, run-claude, etc.)
+- **Model Fallback**: Different models with context transfer (opus → sonnet → gemini)
 - **Smart Routing**: Latency-based, cost-based, capability-based channel selection
 - **Reliability**: Circuit breaker, health monitoring, cooldown mechanisms
 - **Observability**: Decision logging, failure tracking, performance metrics
@@ -30,12 +30,12 @@ Forward to real provider: claude-opus-4-8@lan
 ### 2. Multi-Level Failover
 
 ```
-L1 Channel Failover (same model)
+Channel Failover (channelFirst) (same model)
 ├─ claude-opus-4-8@lan (primary)
 ├─ claude-opus-4-8@n1-claude (failover 1)
 └─ claude-opus-4-8@run-claude (failover 2)
-    ↓ All L1 failed
-L2 Model Fallback (different models)
+    ↓ All all channels failed
+Model Fallback (different models)
 ├─ claude-sonnet-4-6@lan (fallback model 1)
 └─ gemini-2.0-flash-exp@google (fallback model 2)
 ```
@@ -101,8 +101,8 @@ Located at `~/.pi/agent/pi-router.json`:
 │      • Check circuit breaker                        │
 │      • forwardToProvider() → pi-ai streamSimple     │
 │      • On error: record failure, try next           │
-│    - On all L1 failed:                              │
-│      • tryL2ModelFallback()                         │
+│    - On all all channels failed:                              │
+│      • tryModelFallback()                         │
 └─────────────────────────────────────────────────────┘
                       ↓
 ┌─────────────────────────────────────────────────────┐
@@ -142,9 +142,9 @@ Returns `AssistantMessageEventStream` that:
 2. Skips channels in cooldown or with open circuit breaker
 3. Records latency on first event
 4. Catches stream errors and failovers transparently
-5. Falls back to L2 models when all L1 channels exhausted
+5. Falls back to fallback models when all channels exhausted
 
-#### **tryL2ModelFallback()**
+#### **tryModelFallback()**
 Handles cross-model failover:
 1. Iterate through fallback models
 2. Generate context summary (if `contextTransfer: "summary"`)
@@ -409,7 +409,7 @@ Preview differences between config and `models.json`
 **On failure**:
 - Channel failover: Time to detect error + retry (~100-500ms)
 - Circuit breaker: Instant skip (0ms added)
-- L2 fallback: Summary generation + model switch (~2-5s)
+- model fallback: Summary generation + model switch (~2-5s)
 
 ### Memory
 
@@ -441,7 +441,7 @@ Preview differences between config and `models.json`
 
 ### Integration Tests (TODO)
 - Full L1 failover flow
-- L2 model fallback with summary
+- fallback model fallback with summary
 - Circuit breaker opening/closing
 - Cooldown expiration
 
@@ -496,7 +496,7 @@ Preview differences between config and `models.json`
 
 ### v0.1.0-alpha (Current)
 - ✅ L1 channel failover
-- ✅ L2 model fallback with context transfer
+- ✅ fallback model fallback with context transfer
 - ✅ Sticky mode for cache preservation
 - ✅ Latency tracking and sorting
 - ✅ Circuit breaker (fast-fail)
