@@ -392,11 +392,13 @@ function loadConfig(): RouterConfig {
   const configPath = getRouterConfigPath();
   
   if (!fs.existsSync(configPath)) {
-    console.log("[pi-router] No config found, using defaults");
+    console.log("[pi-router] No config found. Auto-discovery disabled by default.");
+    console.log("[pi-router] Create ~/.pi/agent/router.config.json to configure models.");
+    console.log("[pi-router] See examples/router.config.json for reference.");
     return {
       strategy: "channelFirst",
-      auto: true,
-      autoSync: true,
+      auto: false,  // Disabled to avoid slow startup on every launch
+      autoSync: false,
       models: [],
     };
   }
