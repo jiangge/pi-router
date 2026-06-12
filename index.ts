@@ -1222,7 +1222,8 @@ function registerRouterProvider(
   // Register with custom streamSimple handler
   pi.registerProvider("router", {
     api: "custom" as Api,  // Add required api field
-    baseUrl: "",  // Add required baseUrl field (empty for custom provider)
+    baseUrl: "https://router.internal",  // Dummy URL for custom provider
+    apiKey: "router",  // Dummy API key for custom provider
     models: mirrorModels,
     streamSimple: (model: any, context: any, options?: any) => {
       return routeRequest(model, context, options, config, modelMap, pi);
