@@ -179,7 +179,34 @@ function loadModelsJson(): PiModel[] {
   try {
     const content = fs.readFileSync(modelsPath, "utf-8");
     const data = JSON.parse(content);
-    return Array.isArray(data) ? data : [];
+    
+    // models.json structure: { providers: { providerName: { models: [...] } } }
+    if (!data.providers || typeof data.providers !== "object") {
+      console.warn("[pi-router] Invalid models.json structure (no providers)");
+      return [];
+    }
+    
+    const allModels: PiModel[] = [];
+    
+    for (const [providerName, providerData] of Object.entries(data.providers)) {
+      const provider = providerData as any;
+      
+      // Skip providers without models array
+      if (!provider.models || !Array.isArray(provider.models)) {
+        continue;
+      }
+      
+      for (const model of provider.models) {
+        allModels.push({
+          ...model,
+          provider: providerName,
+          api: provider.api || model.api || "unknown",
+          baseUrl: provider.baseUrl || model.baseUrl,
+        });
+      }
+    }
+    
+    return allModels;
   } catch (err) {
     console.error("[pi-router] Failed to load models.json:", err);
     return [];
