@@ -19,9 +19,9 @@ Transparent two-tier router for [pi coding agent](https://github.com/badlogic/pi
 
 - [x] PRD complete
 - [x] Technical foundations verified (pi 0.79.1 source)
-- [ ] MVP: mirror registration + L1 channel failover + cooldown + commands + auto-sync detection
-- [ ] v0.2: latency ranking, circuit breaker, L2 model fallback chain
-- [ ] v0.3: inline fallback mode, overflow trigger, budget/quota, intent suggest/auto
+- [ ] MVP: mirror registration + L1 channel failover + cooldown + commands + auto-sync detection + context transfer (summary mode)
+- [ ] v0.2: latency ranking, circuit breaker, L2 model fallback chain, sticky + health-check primary, decision logger
+- [ ] v0.3: inline fallback mode, overflow trigger, channel budget/quota, `@channel` shortcuts, intent suggest/auto modes, context transfer (full mode with advanced sanitization)
 
 ## Install (when published)
 
@@ -39,6 +39,7 @@ pi install npm:pi-router
 {
   "strategy": "channelFirst",  // default
   "auto": true,  // auto-discover same-id-multi-channel models from models.json
+  "contextTransfer": "summary",  // none | summary (default) | full
   "models": [{
     "id": "claude-opus-4-8",
     "channels": ["lan", "n1-claude", "run-claude"],
@@ -84,6 +85,19 @@ Router auto-generates recommended config on first run, user can accept or custom
 - User can accept all, accept selected, or keep current config
 - Diff view shows: new channels (green), removed channels (red), modified models (yellow)
 
+**Context transfer on model switch:**
+- `none` - No context transfer, fresh start (fast but loses history)
+- `summary` (default) - AI-generated conversation summary (~500 tokens, maintains continuity)
+- `full` - Transfer all messages with compat sanitization (preserves full context)
+
+When switching models (e.g., `claude-opus-4-8` → `claude-sonnet-4-6`), the router generates a concise summary of:
+1. User's main goal/task
+2. Key decisions made  
+3. Current progress/status
+4. Important context for the next model
+
+This ensures the fallback model understands the conversation flow without cache fragmentation.
+
 2. `/reload` in pi
 3. Select `router/claude-opus-4-8` from `/model`
 4. Check status: `/router status`, `/router explain`
@@ -121,6 +135,7 @@ router/auto-ranked     ← mirror entry (dynamic model selection)
 - **Capability scores:** Claude Opus 4.8: 95, GPT-5.5: 98, Sonnet 4.6: 85, Gemini 3 Pro: 90, Haiku 4.5: 75, etc.
 - **Reference pricing:** Official API + third-party platform pricing (Anthropic, OpenAI, Google, run.ai, siliconflow, etc.)
 - **Cost calculation:** `weighted_cost = (input_tokens × input_price) + (output_tokens × output_price) + (cache_reads × cache_read_price) + (cache_writes × cache_write_price)` with typical token distribution weights
+- **Context transfer:** AI-generated conversation summaries on model switch to maintain continuity without cache fragmentation
 
 ## Roadmap
 

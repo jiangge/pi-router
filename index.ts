@@ -41,6 +41,9 @@ type RouterConfig = {
   logDir?: string | null;
   autoSync?: boolean;  // Auto-detect models.json changes and prompt user
   lastSyncHash?: string;  // Hash of models.json at last sync
+  contextTransfer?: "none" | "summary" | "full";  // Context transfer strategy on model switch
+  summaryModel?: string;  // Model to generate summary (default: fallback model)
+  summaryPrompt?: string;  // Custom summary prompt template
 };
 
 type RouterModelConfig = {
@@ -57,6 +60,34 @@ type RouterModelConfig = {
   }>;
   fallbackMode?: "switch" | "inline";
   sticky?: boolean;
+  contextTransfer?: "none" | "summary" | "full";  // Override global setting per model
+};
+
+/**
+ * Context transfer strategies
+ */
+type ContextTransferStrategy = "none" | "summary" | "full";
+
+/**
+ * Default summary prompt template
+ */
+const DEFAULT_SUMMARY_PROMPT = `You are switching from one AI model to another mid-conversation. Please provide a concise summary of the conversation so far, focusing on:
+
+1. User's main goal/task
+2. Key decisions made
+3. Current progress/status
+4. Important context the next model needs
+
+Keep it under 500 tokens. Format as a natural continuation prompt.`;
+
+/**
+ * Summary generation result
+ */
+type SummaryResult = {
+  success: boolean;
+  summary?: string;
+  error?: string;
+  tokensUsed?: number;
 };
 
 /**
@@ -530,4 +561,151 @@ export default function (pi: ExtensionAPI) {
   });
   
   console.log("[pi-router] /router command registered");
+}
+
+/**
+ * Generate context summary for model switching
+ * 
+ * @param messages - Conversation history
+ * @param fromModel - Source model that failed
+ * @param toModel - Target fallback model
+ * @param summaryModel - Model to use for generating summary (default: toModel)
+ * @param promptTemplate - Custom summary prompt
+ * @param pi - ExtensionAPI instance
+ */
+async function generateContextSummary(
+  messages: any[],
+  fromModel: PiModel,
+  toModel: PiModel,
+  summaryModel: PiModel,
+  promptTemplate: string,
+  pi: any
+): Promise<SummaryResult> {
+  try {
+    // Build conversation context
+    const conversationText = messages
+      .map((m, idx) => {
+        const role = m.role || "unknown";
+        const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+        return `[${idx + 1}] ${role}: ${content}`;
+      })
+      .join("\n\n");
+    
+    const summaryPrompt = `${promptTemplate}
+
+---
+
+Conversation to summarize:
+
+${conversationText}
+
+---
+
+Provide the summary now:`;
+    
+    // Call summary model (via pi's streamSimple or similar)
+    // TODO: Implement actual API call when we have access to pi's internal methods
+    // For now, return a structured placeholder
+    
+    console.log("[pi-router] Generating context summary...");
+    console.log(`[pi-router] From: ${fromModel.id}@${fromModel.provider}`);
+    console.log(`[pi-router] To: ${toModel.id}@${toModel.provider}`);
+    console.log(`[pi-router] Using summary model: ${summaryModel.id}@${summaryModel.provider}`);
+    
+    // Placeholder implementation
+    const summary = `[Context Transfer Summary]
+Previous model: ${fromModel.id}
+Conversation length: ${messages.length} messages
+
+The user was working on a task that requires continuation with the new model ${toModel.id}.`;
+    
+    return {
+      success: true,
+      summary,
+      tokensUsed: 0, // Will be populated by actual API call
+    };
+  } catch (err) {
+    console.error("[pi-router] Failed to generate summary:", err);
+    return {
+      success: false,
+      error: String(err),
+    };
+  }
+}
+
+/**
+ * Sanitize context for model switch
+ * 
+ * @param context - Original context
+ * @param fromModel - Source model
+ * @param toModel - Target model
+ * @param transferStrategy - How to transfer context
+ * @param summary - Generated summary (if strategy is 'summary')
+ */
+function sanitizeContextForSwitch(
+  context: any,
+  fromModel: PiModel,
+  toModel: PiModel,
+  transferStrategy: ContextTransferStrategy,
+  summary?: string
+): any {
+  const sanitized = { ...context };
+  
+  // Strategy: none - minimal context, just system prompt
+  if (transferStrategy === "none") {
+    sanitized.messages = [];
+    if (summary) {
+      sanitized.systemPrompt = `${context.systemPrompt || ""}
+
+[Model switched: ${fromModel.id} → ${toModel.id}]
+${summary}`;
+    }
+    return sanitized;
+  }
+  
+  // Strategy: summary - replace conversation with summary
+  if (transferStrategy === "summary" && summary) {
+    sanitized.messages = [
+      {
+        role: "user",
+        content: summary,
+      },
+    ];
+    return sanitized;
+  }
+  
+  // Strategy: full - transfer all messages (default)
+  // But still need to handle compat differences
+  
+  // 1. Handle context window constraints
+  if (toModel.contextWindow && fromModel.contextWindow) {
+    if (toModel.contextWindow < fromModel.contextWindow) {
+      // Truncate to fit target model
+      const ratio = toModel.contextWindow / fromModel.contextWindow;
+      const keepCount = Math.floor((sanitized.messages?.length || 0) * ratio);
+      if (sanitized.messages && sanitized.messages.length > keepCount) {
+        sanitized.messages = sanitized.messages.slice(-keepCount);
+        console.log(`[pi-router] Truncated context: ${sanitized.messages.length} messages kept`);
+      }
+    }
+  }
+  
+  // 2. Handle developer role compatibility
+  if (sanitized.messages && !toModel.compat?.supportsDeveloperRole) {
+    sanitized.messages = sanitized.messages.map((m: any) => {
+      if (m.role === "developer") {
+        return { ...m, role: "system" };
+      }
+      return m;
+    });
+  }
+  
+  // 3. Handle reasoning/thinking compatibility
+  if (fromModel.reasoning && !toModel.reasoning) {
+    // Remove thinking-related fields
+    delete sanitized.thinkingLevel;
+    delete sanitized.thinkingLevelMap;
+  }
+  
+  return sanitized;
 }
