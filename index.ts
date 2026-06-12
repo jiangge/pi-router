@@ -1,5 +1,5 @@
 /**
- * pi-router v0.1.0-alpha
+ * pi-router v0.3.0-alpha
  * Transparent two-tier router for pi coding agent
  * 
  * Routes channels (same model, different providers) with opt-in model fallback chain.
@@ -160,6 +160,78 @@ const REFERENCE_PRICING: Record<string, { input: number; output: number; cacheRe
   "deepseek-v3": { input: 0.27, output: 1.1, cacheRead: 0.027, cacheWrite: 0.3375 },
   "deepseek-r1": { input: 0.55, output: 2.19, cacheRead: 0.055, cacheWrite: 0.6875 },
 };
+
+/**
+ * Channel pricing multipliers (v0.3.0)
+ * Different channels may have different pricing for the same model
+ */
+const CHANNEL_PRICING_MULTIPLIERS: Record<string, number> = {
+  // Official providers (1.0x = reference pricing)
+  "anthropic": 1.0,
+  "openai": 1.0,
+  "google": 1.0,
+  
+  // Third-party aggregators (may add markup)
+  "openrouter": 1.1,     // 10% markup
+  "together": 1.05,      // 5% markup
+  "fireworks": 1.08,     // 8% markup
+  
+  // Self-hosted / LAN (0.0x = free infrastructure cost)
+  "lan": 0.0,            // Free (your own infrastructure)
+  "local": 0.0,          // Free (local deployment)
+  "self-hosted": 0.0,    // Free (your servers)
+  
+  // Custom channels (default: assume same as official)
+  "n1-claude": 1.0,      // Your custom Claude channel
+  "run-claude": 1.0,     // Your custom Claude channel
+};
+
+/**
+ * Get effective pricing for a specific model@channel
+ */
+function getChannelPricing(
+  modelId: string,
+  channel: string
+): { input: number; output: number; cacheRead: number; cacheWrite: number } | null {
+  const basePricing = REFERENCE_PRICING[modelId];
+  if (!basePricing) {
+    return null;
+  }
+  
+  const multiplier = CHANNEL_PRICING_MULTIPLIERS[channel] ?? 1.0;
+  
+  return {
+    input: basePricing.input * multiplier,
+    output: basePricing.output * multiplier,
+    cacheRead: basePricing.cacheRead * multiplier,
+    cacheWrite: basePricing.cacheWrite * multiplier,
+  };
+}
+
+/**
+ * Calculate cost for a request (estimated)
+ */
+function estimateRequestCost(
+  modelId: string,
+  channel: string,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens = 0,
+  cacheWriteTokens = 0
+): number {
+  const pricing = getChannelPricing(modelId, channel);
+  if (!pricing) {
+    return 0;
+  }
+  
+  const cost =
+    (inputTokens / 1_000_000) * pricing.input +
+    (outputTokens / 1_000_000) * pricing.output +
+    (cacheReadTokens / 1_000_000) * pricing.cacheRead +
+    (cacheWriteTokens / 1_000_000) * pricing.cacheWrite;
+  
+  return cost;
+}
 
 /**
  * Diff types for models.json changes
@@ -416,7 +488,7 @@ export default function (pi: ExtensionAPI) {
   // Start background health probes if enabled
   startHealthProbes(config);
   
-  console.log("[pi-router] Extension loaded (v0.1.0-alpha)");
+  console.log("[pi-router] Extension loaded (v0.3.0-alpha)");
   console.log("[pi-router] Strategy:", config.strategy ?? "channelFirst");
   console.log("[pi-router] Configured models:", config.models?.length ?? 0);
   
@@ -697,18 +769,60 @@ export default function (pi: ExtensionAPI) {
         }
         
         ctx.ui.notify(lines.join("\n"), "info");
+      } else if (subcommand === "pricing") {
+        // Show pricing for all configured models
+        const models = config.models || [];
+        const lines: string[] = ["Channel Pricing (USD per 1M tokens):", ""];
+        
+        if (models.length === 0) {
+          lines.push("  No models configured.");
+        } else {
+          for (const model of models) {
+            lines.push(`${model.id}:`);
+            
+            for (const channel of model.channels) {
+              const pricing = getChannelPricing(model.id, channel);
+              
+              if (!pricing) {
+                lines.push(`  ${channel}: (no pricing data)`);
+              } else if (pricing.input === 0 && pricing.output === 0) {
+                lines.push(`  ${channel}: FREE (self-hosted)`);
+              } else {
+                const multiplier = CHANNEL_PRICING_MULTIPLIERS[channel] ?? 1.0;
+                const markupStr = multiplier === 1.0 ? "" : ` (${multiplier}x)`;
+                lines.push(`  ${channel}: in=$${pricing.input.toFixed(2)} out=$${pricing.output.toFixed(2)}${markupStr}`);
+              }
+            }
+            
+            lines.push("");
+          }
+          
+          lines.push("Example cost (1000 in, 500 out tokens):");
+          for (const model of models) {
+            lines.push(`${model.id}:`);
+            for (const channel of model.channels) {
+              const cost = estimateRequestCost(model.id, channel, 1000, 500);
+              const costStr = cost === 0 ? "FREE" : `$${cost.toFixed(6)}`;
+              lines.push(`  ${channel}: ${costStr}`);
+            }
+            lines.push("");
+          }
+        }
+        
+        ctx.ui.notify(lines.join("\n"), "info");
       } else {
         ctx.ui.notify(
-          "pi-router v0.1.0-alpha\n\n" +
+          "pi-router v0.3.0-alpha\n\n" +
           "Commands:\n" +
           "  /router status\n" +
           "  /router list\n" +
           "  /router explain   - show failures, latency, health\n" +
           "  /router decisions - show recent routing decisions\n" +
           "  /router probes    - show background health probes\n" +
+          "  /router pricing   - show per-channel pricing\n" +
           "  /router sync      - check models.json changes\n" +
           "  /router diff      - preview config differences\n" +
-          "\nMVP in progress — full features coming in v0.2+",
+          "\nv0.3.0 features: Real pricing, health probes, AI summaries",
           "info"
         );
       }
@@ -1468,20 +1582,29 @@ async function tryL2ModelFallback(
  * Sort channels by cost (lower cost first)
  */
 function sortChannelsByCost(modelId: string, channels: string[]): string[] {
-  const pricing = REFERENCE_PRICING[modelId];
+  // Get pricing for each channel
+  const channelsWithPricing = channels.map(channel => {
+    const pricing = getChannelPricing(modelId, channel);
+    if (!pricing) {
+      return { channel, cost: Infinity };
+    }
+    
+    // Calculate weighted average cost (assume typical usage: 1000 input, 500 output tokens)
+    const estimatedCost = estimateRequestCost(modelId, channel, 1000, 500, 0, 0);
+    
+    return { channel, cost: estimatedCost };
+  });
   
-  if (!pricing) {
-    console.log(`[pi-router] No pricing data for ${modelId}, using config order`);
-    return channels;
-  }
+  // Sort by cost (lowest first)
+  channelsWithPricing.sort((a, b) => a.cost - b.cost);
   
-  // Calculate weighted cost for each channel
-  // In reality, different channels may have different pricing, but for now we assume same pricing per model
-  // TODO: Add per-channel pricing data
+  console.log(`[pi-router] Sorted channels by cost for ${modelId}:`);
+  channelsWithPricing.forEach(({ channel, cost }) => {
+    const costStr = cost === Infinity ? "unknown" : cost === 0 ? "free" : `$${cost.toFixed(6)}`;
+    console.log(`  ${channel}: ${costStr}`);
+  });
   
-  // For now, just return config order since we don't have per-channel pricing
-  console.log(`[pi-router] Per-channel pricing not available, using config order`);
-  return channels;
+  return channelsWithPricing.map(c => c.channel);
 }
 
 /**
@@ -1790,6 +1913,7 @@ type RoutingDecision = {
   fallbackUsed: boolean;
   fallbackModel?: string;
   reason: string;
+  estimatedCost?: number;  // v0.3.0: Estimated cost in USD
 };
 
 type DecisionLogger = {
