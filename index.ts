@@ -621,6 +621,44 @@ export default function (pi: ExtensionAPI) {
         if (healthCount === 0) {
           lines.push("  (no data yet)");
         }
+        lines.push("");
+        
+        // Circuit breaker status
+        lines.push("Circuit Breakers:");
+        let circuitCount = 0;
+        for (const [key, status] of circuitBreaker.circuits.entries()) {
+          if (status.state !== "closed") {
+            const stateIcon = status.state === "open" ? "🔴" : "🟡";
+            const retryIn = status.nextRetryTime > now ? Math.ceil((status.nextRetryTime - now) / 1000) : 0;
+            lines.push(`  ${stateIcon} ${key}: ${status.state} (${status.failureCount} failures, retry in ${retryIn}s)`);
+            circuitCount++;
+          }
+        }
+        if (circuitCount === 0) {
+          lines.push("  (all circuits closed)");
+        }
+        
+        ctx.ui.notify(lines.join("\n"), "info");
+      } else if (subcommand === "decisions") {
+        // Show recent routing decisions
+        const decisions = getRecentDecisions(20);
+        const lines: string[] = ["Recent Routing Decisions (last 20):", ""];
+        
+        if (decisions.length === 0) {
+          lines.push("  (no decisions yet)");
+        } else {
+          const now = Date.now();
+          decisions.forEach(d => {
+            const ago = Math.floor((now - d.timestamp) / 1000);
+            const fallbackStr = d.fallbackUsed ? ` -> ${d.fallbackModel}` : "";
+            const latencyStr = d.latencyMs ? ` (${d.latencyMs}ms)` : "";
+            lines.push(`  ${d.modelId} -> ${d.selectedChannel}${fallbackStr}${latencyStr} (${ago}s ago)`);
+            lines.push(`    Strategy: ${d.sortStrategy} | ${d.reason}`);
+            if (d.attemptedChannels.length > 1) {
+              lines.push(`    Tried: ${d.attemptedChannels.join(" -> ")}`);
+            }
+          });
+        }
         
         ctx.ui.notify(lines.join("\n"), "info");
       } else {
@@ -629,9 +667,10 @@ export default function (pi: ExtensionAPI) {
           "Commands:\n" +
           "  /router status\n" +
           "  /router list\n" +
-          "  /router explain\n" +
-          "  /router sync    - check models.json changes\n" +
-          "  /router diff    - preview config differences\n" +
+          "  /router explain   - show failures, latency, health\n" +
+          "  /router decisions - show recent routing decisions\n" +
+          "  /router sync      - check models.json changes\n" +
+          "  /router diff      - preview config differences\n" +
           "\nMVP in progress — full features coming in v0.2+",
           "info"
         );
@@ -1001,6 +1040,8 @@ function createFailoverStream(
   let currentChannelIndex = 0;
   let currentStream: AssistantMessageEventStream | null = null;
   let currentChannel: string | null = null;
+  let attemptedChannels: string[] = [];
+  const sortStrategy = modelConfig.sortBy || config.sortBy || "config";
   
   const tryNextChannel = (): AssistantMessageEventStream | null => {
     while (currentChannelIndex < channelOrder.length) {
@@ -1017,6 +1058,12 @@ function createFailoverStream(
         continue;
       }
       
+      // Check circuit breaker
+      if (!canAttemptChannel(modelId, channel)) {
+        console.log(`[pi-router] Circuit breaker open for ${channel}, skipping`);
+        continue;
+      }
+      
       const targetModel = modelMap.get(key);
       if (!targetModel) {
         console.warn(`[pi-router] Model not found: ${key}`);
@@ -1024,16 +1071,30 @@ function createFailoverStream(
       }
       
       console.log(`[pi-router] Attempting ${channel}...`);
+      attemptedChannels.push(channel);
       
       try {
         currentChannel = channel;
         currentStream = forwardToProvider(targetModel, context, options);
         console.log(`[pi-router] Started stream on ${key}`);
         routerState.activeChannels.set(modelId, channel);
+        
+        // Log decision
+        logDecision({
+          timestamp: Date.now(),
+          modelId,
+          selectedChannel: channel,
+          attemptedChannels: [...attemptedChannels],
+          sortStrategy,
+          fallbackUsed: false,
+          reason: attemptedChannels.length === 1 ? "first choice" : `failover after ${attemptedChannels.length - 1} failures`,
+        });
+        
         return currentStream;
       } catch (err) {
         console.error(`[pi-router] Failed to start stream on ${channel}:`, err);
         recordFailure(modelId, channel, String(err), config, modelConfig);
+        recordCircuitOutcome(modelId, channel, false);
       }
     }
     
@@ -1075,6 +1136,16 @@ function createFailoverStream(
           const latency = Date.now() - streamStartTime;
           recordLatency(modelId, currentChannel, latency);
           updateHealthStatus(modelId, currentChannel, true);
+          recordCircuitOutcome(modelId, currentChannel, true);
+          
+          // Update the most recent decision with latency
+          if (decisionLogger.decisions.length > 0) {
+            const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
+            if (lastDecision.modelId === modelId && lastDecision.selectedChannel === currentChannel) {
+              lastDecision.latencyMs = latency;
+            }
+          }
+          
           firstEvent = false;
         }
         eventStream.push(event);
@@ -1117,6 +1188,16 @@ function createFailoverStream(
             const latency = Date.now() - streamStartTime;
             recordLatency(modelId, currentChannel, latency);
             updateHealthStatus(modelId, currentChannel, true);
+            recordCircuitOutcome(modelId, currentChannel, true);
+            
+            // Update the most recent decision with latency
+            if (decisionLogger.decisions.length > 0) {
+              const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
+              if (lastDecision.modelId === modelId && lastDecision.selectedChannel === currentChannel) {
+                lastDecision.latencyMs = latency;
+              }
+            }
+            
             firstEvent = false;
           }
           eventStream.push(event);
@@ -1487,4 +1568,177 @@ function isChannelHealthy(modelId: string, channel: string): boolean {
   }
   
   return status.healthy;
+}
+
+/**
+ * Circuit breaker for fast-fail on consistently failing channels
+ */
+type CircuitState = "closed" | "open" | "half-open";
+
+type CircuitBreakerStatus = {
+  state: CircuitState;
+  failureCount: number;
+  lastFailureTime: number;
+  nextRetryTime: number;
+};
+
+type CircuitBreaker = {
+  circuits: Map<string, CircuitBreakerStatus>; // "modelId@channel" -> status
+  failureThreshold: number; // Open circuit after N failures
+  resetTimeoutMs: number; // Try half-open after this duration
+  enabled: boolean;
+};
+
+const circuitBreaker: CircuitBreaker = {
+  circuits: new Map(),
+  failureThreshold: 5, // Open after 5 consecutive failures
+  resetTimeoutMs: 120000, // Try again after 2 minutes
+  enabled: true,
+};
+
+/**
+ * Check if circuit breaker allows request
+ */
+function canAttemptChannel(modelId: string, channel: string): boolean {
+  if (!circuitBreaker.enabled) {
+    return true;
+  }
+  
+  const key = `${modelId}@${channel}`;
+  const status = circuitBreaker.circuits.get(key);
+  
+  if (!status) {
+    return true; // No circuit breaker for this channel yet
+  }
+  
+  const now = Date.now();
+  
+  if (status.state === "closed") {
+    return true; // Circuit closed, allow requests
+  }
+  
+  if (status.state === "open") {
+    // Check if it's time to try half-open
+    if (now >= status.nextRetryTime) {
+      status.state = "half-open";
+      console.log(`[pi-router] Circuit half-open for ${key}, allowing test request`);
+      return true;
+    }
+    console.log(`[pi-router] Circuit open for ${key}, blocking request`);
+    return false;
+  }
+  
+  if (status.state === "half-open") {
+    // Allow one test request in half-open state
+    return true;
+  }
+  
+  return true;
+}
+
+/**
+ * Record circuit breaker outcome
+ */
+function recordCircuitOutcome(
+  modelId: string,
+  channel: string,
+  success: boolean
+): void {
+  if (!circuitBreaker.enabled) {
+    return;
+  }
+  
+  const key = `${modelId}@${channel}`;
+  let status = circuitBreaker.circuits.get(key);
+  
+  if (!status) {
+    status = {
+      state: "closed",
+      failureCount: 0,
+      lastFailureTime: 0,
+      nextRetryTime: 0,
+    };
+    circuitBreaker.circuits.set(key, status);
+  }
+  
+  if (success) {
+    // Reset on success
+    if (status.state === "half-open") {
+      console.log(`[pi-router] Circuit closed for ${key} after successful test`);
+    }
+    status.state = "closed";
+    status.failureCount = 0;
+  } else {
+    // Increment failure count
+    status.failureCount++;
+    status.lastFailureTime = Date.now();
+    
+    if (status.state === "half-open") {
+      // Failed during test, reopen circuit
+      status.state = "open";
+      status.nextRetryTime = Date.now() + circuitBreaker.resetTimeoutMs;
+      console.log(`[pi-router] Circuit reopened for ${key}, retry in ${circuitBreaker.resetTimeoutMs / 1000}s`);
+    } else if (status.failureCount >= circuitBreaker.failureThreshold) {
+      // Open circuit after threshold
+      status.state = "open";
+      status.nextRetryTime = Date.now() + circuitBreaker.resetTimeoutMs;
+      console.log(`[pi-router] Circuit opened for ${key} after ${status.failureCount} failures`);
+    }
+  }
+}
+
+/**
+ * Decision logger for observability
+ */
+type RoutingDecision = {
+  timestamp: number;
+  modelId: string;
+  selectedChannel: string;
+  attemptedChannels: string[];
+  sortStrategy: string;
+  latencyMs?: number;
+  fallbackUsed: boolean;
+  fallbackModel?: string;
+  reason: string;
+};
+
+type DecisionLogger = {
+  decisions: RoutingDecision[];
+  maxDecisions: number;
+  enabled: boolean;
+};
+
+const decisionLogger: DecisionLogger = {
+  decisions: [],
+  maxDecisions: 50, // Keep last 50 decisions
+  enabled: true,
+};
+
+/**
+ * Log routing decision
+ */
+function logDecision(decision: RoutingDecision): void {
+  if (!decisionLogger.enabled) {
+    return;
+  }
+  
+  decisionLogger.decisions.push(decision);
+  
+  // Keep only recent decisions
+  if (decisionLogger.decisions.length > decisionLogger.maxDecisions) {
+    decisionLogger.decisions.shift();
+  }
+  
+  console.log(
+    `[pi-router] Decision: ${decision.modelId} -> ${decision.selectedChannel}` +
+    (decision.fallbackUsed ? ` (fallback: ${decision.fallbackModel})` : "") +
+    ` | ${decision.reason}`
+  );
+}
+
+/**
+ * Get recent routing decisions
+ */
+function getRecentDecisions(limit: number = 10): RoutingDecision[] {
+  return decisionLogger.decisions.slice(-limit);
 }
