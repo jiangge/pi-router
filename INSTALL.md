@@ -1,99 +1,150 @@
 # Installation Guide
 
-## Prerequisites
+Pi-router is a standard pi extension. Installation is simple and follows pi's extension management commands.
 
-- Node.js 18+ (or compatible with ES2022)
-- Pi coding agent v0.79.0+
-- Access to multiple provider channels (lan, n1-claude, run-claude, etc.)
+## Quick Install
 
-## Step 1: Clone and Build
+### From npm (after publication)
 
 ```bash
-cd ~/jiang/source  # or your preferred directory
-git clone https://github.com/jiangge/pi-router.git
-cd pi-router
-npm install
-npm run build
+# Install globally
+pi install npm:pi-router
+
+# Or install for current project only
+pi install npm:pi-router -l
 ```
 
-## Step 2: Link as Pi Extension
+### From GitHub
 
 ```bash
-# Create extensions directory if it doesn't exist
-mkdir -p ~/.pi/agent/extensions
+# Install from git
+pi install git:github.com/jiangjilin/pi-router
 
-# Link the extension
-ln -sf $(pwd) ~/.pi/agent/extensions/pi-router
+# Or with specific version/tag
+pi install git:github.com/jiangjilin/pi-router@v0.3.0
 ```
 
-## Step 3: Configure Router
+### From Local Directory (for development)
 
-Create `~/.pi/agent/pi-router.json`:
+```bash
+# Install from local path
+pi install /path/to/pi-router
+
+# Or relative path
+pi install ./pi-router
+```
+
+---
+
+## Configuration
+
+Create configuration file at `~/.pi/agent/router.config.json`:
+
+### Minimal Configuration
 
 ```json
 {
   "strategy": "channelFirst",
-  "auto": true,
-  "sticky": true,
-  "contextTransfer": "summary",
-  "sortBy": "latency",
   "models": [
     {
       "id": "claude-opus-4-8",
-      "channels": ["lan", "n1-claude", "run-claude"],
-      "fallbackModels": [
-        {
-          "id": "claude-sonnet-4-6",
-          "channels": ["lan"]
-        }
-      ]
+      "channels": ["anthropic", "openrouter"]
     }
   ]
 }
 ```
 
-**Or use auto-discovery** (recommended):
+### Full Configuration
 
-Set `"auto": true` and the router will automatically detect all multi-channel models from `~/.pi/agent/models.json`.
+See `examples/router.config.json` for all available options.
 
-## Step 4: Verify Installation
+---
 
-Start pi and check that the extension loaded:
+## Verify Installation
+
+```bash
+# List installed packages
+pi list
+
+# Should show: pi-router@0.3.0-alpha.1
+```
+
+Start pi:
 
 ```bash
 pi
 ```
 
-In pi, type:
-
-```
-/router status
-```
-
 You should see:
 
 ```
-Router Status:
-  Strategy: channelFirst
-  Auto-discovery: enabled
-  Sticky mode: enabled
-  Context transfer: summary
-  
-Models (1):
-  router/claude-opus-4-8
-    Channels: lan, n1-claude, run-claude
-    Fallback: claude-sonnet-4-6
+[pi-router] Extension loaded (v0.3.0-alpha)
+[pi-router] Strategy: channelFirst
+[pi-router] Configured models: X
+[pi-router] /router command registered
 ```
 
-## Step 5: Use Router Models
+---
 
-Select a router model in pi:
+## Usage
 
+### Available Commands
+
+```bash
+/router status       # Show current configuration
+/router list         # List available router models
+/router pricing      # Show per-channel pricing
+/router explain      # Show health, failures, and circuits
+/router decisions    # Show recent routing decisions
+/router probes       # Show background health probe results
+/router sync         # Check for model changes
+/router diff         # Preview configuration differences
 ```
-Model: router/claude-opus-4-8
+
+### Select Router Model
+
+```bash
+/model
+# Select router/model-name from the list
 ```
 
-Now all your requests will be routed through pi-router with automatic failover!
+Router models are prefixed with `router/`:
+- `router/claude-opus-4-8`
+- `router/gpt-5.5`
+- etc.
+
+---
+
+## Update
+
+```bash
+# Update pi-router
+pi update npm:pi-router
+
+# Or update all packages
+pi update
+```
+
+---
+
+## Uninstall
+
+```bash
+# Remove pi-router
+pi remove npm:pi-router
+
+# Or for git installations
+pi remove git:github.com/jiangjilin/pi-router
+
+# Or for local installations
+pi remove /path/to/pi-router
+```
+
+The configuration file (`~/.pi/agent/router.config.json`) will remain. Delete it manually if needed:
+
+```bash
+rm ~/.pi/agent/router.config.json
+```
 
 ---
 
@@ -101,124 +152,106 @@ Now all your requests will be routed through pi-router with automatic failover!
 
 ### Extension not loading
 
-Check pi's extension logs:
+1. Check installation:
+   ```bash
+   pi list
+   ```
+
+2. Restart pi or reload:
+   ```bash
+   /reload
+   ```
+
+3. Check logs for errors
+
+### Configuration not found
+
+Pi-router works without configuration (auto-discovery mode). To use custom configuration:
+
+1. Create `~/.pi/agent/router.config.json`
+2. Add at least `strategy` and `models`
+3. Restart pi or `/reload`
+
+### Commands not available
+
+If `/router` commands are not available:
+
+1. Verify extension is loaded (check startup logs)
+2. Try `/reload`
+3. Check for conflicts with other extensions
+
+---
+
+## Development Setup
+
+For contributors or local development:
+
+### 1. Clone Repository
 
 ```bash
-# In pi console
-/extensions
+git clone https://github.com/jiangjilin/pi-router.git
+cd pi-router
 ```
 
-Make sure `pi-router` appears in the list.
-
-### No router models available
-
-1. Check that `models.json` has multi-channel models
-2. Run `/router list` to see what models are registered
-3. Check config file: `cat ~/.pi/agent/pi-router.json`
-
-### Channels failing immediately
-
-1. Run `/router explain` to see failure history
-2. Check circuit breaker states
-3. Verify provider endpoints are accessible
-4. Check cooldown periods
-
-### Build errors
-
-Make sure dependencies are installed:
+### 2. Install Dependencies
 
 ```bash
-cd pi-router
 npm install
+```
+
+### 3. Build
+
+```bash
 npm run build
 ```
 
----
+### 4. Install Locally
 
-## Configuration Tips
+```bash
+# Method 1: Using pi install
+pi install .
 
-### For Maximum Reliability
-
-```json
-{
-  "strategy": "channelFirst",
-  "sticky": false,
-  "sortBy": "config",
-  "models": [{
-    "id": "claude-opus-4-8",
-    "channels": ["lan", "n1-claude", "run-claude"],
-    "fallbackModels": [
-      { "id": "claude-sonnet-4-6", "channels": ["lan", "n1-claude"] }
-    ]
-  }]
-}
+# Method 2: Symlink (for development)
+ln -sf $(pwd) ~/.pi/agent/extensions/pi-router
 ```
 
-### For Minimum Cost
-
-```json
-{
-  "strategy": "channelFirst",
-  "sticky": true,
-  "sortBy": "cost",
-  "models": [{
-    "id": "claude-opus-4-8",
-    "channels": ["lan", "n1-claude", "run-claude"]
-  }]
-}
-```
-
-### For Best Performance
-
-```json
-{
-  "strategy": "channelFirst",
-  "sticky": true,
-  "sortBy": "latency",
-  "models": [{
-    "id": "claude-opus-4-8",
-    "channels": ["lan", "n1-claude", "run-claude"]
-  }]
-}
-```
-
----
-
-## Development
-
-### Watch mode
+### 5. Watch Mode (for development)
 
 ```bash
 npm run watch
 ```
 
-### Type checking only
-
-```bash
-npm run typecheck
-```
-
-### Testing locally
-
-After making changes:
-
-1. `npm run build`
-2. Restart pi
-3. Test with `/router status` and `/router explain`
+Changes will be automatically recompiled. Use `/reload` in pi to load updates.
 
 ---
 
-## Uninstall
+## Platform-Specific Notes
 
-```bash
-# Remove symlink
-rm ~/.pi/agent/extensions/pi-router
+### Linux / macOS
 
-# Remove config
-rm ~/.pi/agent/pi-router.json
+Standard installation works out of the box.
 
-# Remove source (optional)
-rm -rf ~/jiang/source/pi-router
+### Windows
+
+Use PowerShell or Command Prompt:
+
+```powershell
+pi install npm:pi-router
 ```
 
-Restart pi to complete uninstallation.
+Configuration file location: `%USERPROFILE%\.pi\agent\router.config.json`
+
+---
+
+## Next Steps
+
+- See [README.md](README.md) for feature overview
+- See [TESTING.md](TESTING.md) for test scenarios
+- See [examples/](examples/) for configuration examples
+- Check [CHANGELOG.md](CHANGELOG.md) for version history
+
+---
+
+**Version**: v0.3.0-alpha.1  
+**Author**: Jiang Jilin  
+**License**: MIT

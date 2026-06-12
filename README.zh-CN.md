@@ -19,40 +19,43 @@
 ### 1. 安装
 
 ```bash
-npm install pi-router
-# 或
-yarn add pi-router
+# 从 npm 安装（发布后）
+pi install npm:pi-router
+
+# 或从 GitHub 安装
+pi install git:github.com/jiangjilin/pi-router
+
+# 或从本地目录安装（开发用）
+pi install /path/to/pi-router
 ```
+
+详细安装选项请参见 [INSTALL.md](INSTALL.md)。
 
 ### 2. 配置
 
-编辑 `~/.pi/agent/pi-router.json`：
+创建 `~/.pi/agent/router.config.json`：
 
 ```json
 {
   "strategy": "channelFirst",
-  "auto": true,
-  "sticky": true,
-  "contextTransfer": "summary",
-  "sortBy": "latency",
   "models": [
     {
       "id": "claude-opus-4-8",
-      "channels": ["lan", "n1-claude", "run-claude"],
-      "fallbackModels": [
-        { "id": "claude-sonnet-4-6", "channels": ["lan"] }
-      ]
+      "channels": ["anthropic", "openrouter"]
     }
   ]
 }
 ```
+
+完整配置请参见 [examples/router.config.json](examples/router.config.json)。
 
 ### 3. 使用
 
 在 pi 中选择 router 模型：
 
 ```
-模型：router/claude-opus-4-8
+/model
+# 选择：router/claude-opus-4-8
 ```
 
 Pi-router 会自动：

@@ -19,40 +19,43 @@ English | [简体中文](./README.zh-CN.md)
 ### 1. Install
 
 ```bash
-cd /home/jiang/jiang/source/pi-router
-npm install
-npm run build
+# From npm (after publication)
+pi install npm:pi-router
+
+# Or from GitHub
+pi install git:github.com/jiangjilin/pi-router
+
+# Or from local directory (for development)
+pi install /path/to/pi-router
 ```
+
+See [INSTALL.md](INSTALL.md) for detailed installation options.
 
 ### 2. Configure
 
-Edit `~/.pi/agent/pi-router.json`:
+Create `~/.pi/agent/router.config.json`:
 
 ```json
 {
   "strategy": "channelFirst",
-  "auto": true,
-  "sticky": true,
-  "contextTransfer": "summary",
-  "sortBy": "latency",
   "models": [
     {
       "id": "claude-opus-4-8",
-      "channels": ["lan", "n1-claude", "run-claude"],
-      "fallbackModels": [
-        { "id": "claude-sonnet-4-6", "channels": ["lan"] }
-      ]
+      "channels": ["anthropic", "openrouter"]
     }
   ]
 }
 ```
+
+See [examples/router.config.json](examples/router.config.json) for full configuration.
 
 ### 3. Use
 
 In pi, select a router model:
 
 ```
-Model: router/claude-opus-4-8
+/model
+# Select: router/claude-opus-4-8
 ```
 
 Pi-router will automatically:
