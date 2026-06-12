@@ -442,44 +442,78 @@ function saveConfig(config: RouterConfig): void {
 
 /**
  * Main extension export
+ * 
+ * Performance optimization: Lazy load models.json only when needed
  */
 export default function (pi: ExtensionAPI) {
   const config = loadConfig();
-  const currentModels = loadModelsJson();
-  const modelsJsonHash = calculateFileHash(getModelsJsonPath());
   
-  // Auto-sync check on load
-  if (config.autoSync !== false && config.lastSyncHash && config.lastSyncHash !== modelsJsonHash) {
-    const diff = detectModelChanges(config, currentModels);
-    const hasChanges = diff.added.length > 0 || diff.removed.length > 0 || diff.modified.length > 0;
-    
-    if (hasChanges) {
-      console.log("[pi-router] Detected models.json changes:");
-      console.log(`  Added: ${diff.added.length}, Removed: ${diff.removed.length}, Modified: ${diff.modified.length}`);
-      console.log("[pi-router] Run '/router sync' to review and update config");
-    }
-  }
+  // Check if we have configured models
+  const hasConfiguredModels = config.models && config.models.length > 0;
   
-  // Auto-discover models if enabled
-  if (config.auto && config.models?.length === 0) {
-    const groups = groupModelsByChannels(currentModels);
-    const autoModels: RouterModelConfig[] = [];
+  // Lazy loading: Only load models.json when needed
+  let currentModels: PiModel[] | undefined;
+  let modelsJsonHash: string | undefined;
+  
+  // Only perform expensive operations if necessary
+  const needsModelData = (
+    // Auto-sync is enabled and we have previous sync
+    (config.autoSync !== false && config.lastSyncHash) ||
+    // Auto-discovery is enabled and no models configured
+    (config.auto && !hasConfiguredModels)
+  );
+  
+  if (needsModelData) {
+    // Load models.json only when actually needed
+    currentModels = loadModelsJson();
+    modelsJsonHash = calculateFileHash(getModelsJsonPath());
     
-    for (const [modelId, channels] of groups.entries()) {
-      if (channels.length > 1) {
-        autoModels.push({
-          id: modelId,
-          channels,
-        });
+    // Auto-sync check
+    if (config.autoSync !== false && config.lastSyncHash && config.lastSyncHash !== modelsJsonHash) {
+      const diff = detectModelChanges(config, currentModels);
+      const hasChanges = diff.added.length > 0 || diff.removed.length > 0 || diff.modified.length > 0;
+      
+      if (hasChanges) {
+        console.log("[pi-router] Detected models.json changes:");
+        console.log(`  Added: ${diff.added.length}, Removed: ${diff.removed.length}, Modified: ${diff.modified.length}`);
+        console.log("[pi-router] Run '/router sync' to review and update config");
       }
     }
     
-    if (autoModels.length > 0) {
-      console.log(`[pi-router] Auto-discovered ${autoModels.length} multi-channel models`);
-      config.models = autoModels;
-      config.lastSyncHash = modelsJsonHash;
-      saveConfig(config);
+    // Auto-discover models if enabled and no models configured
+    if (config.auto && !hasConfiguredModels) {
+      const groups = groupModelsByChannels(currentModels);
+      const autoModels: RouterModelConfig[] = [];
+      
+      for (const [modelId, channels] of groups.entries()) {
+        if (channels.length > 1) {
+          autoModels.push({
+            id: modelId,
+            channels,
+          });
+        }
+      }
+      
+      if (autoModels.length > 0) {
+        console.log(`[pi-router] Auto-discovered ${autoModels.length} multi-channel models`);
+        config.models = autoModels;
+        config.lastSyncHash = modelsJsonHash;
+        saveConfig(config);
+      } else {
+        console.log("[pi-router] No multi-channel models found for auto-discovery");
+      }
     }
+  }
+  
+  // Early exit if no models configured
+  if (!config.models || config.models.length === 0) {
+    console.log("[pi-router] No models configured. Create router.config.json or enable auto-discovery.");
+    return;
+  }
+  
+  // Load models.json for registration if not already loaded
+  if (!currentModels) {
+    currentModels = loadModelsJson();
   }
   
   // Register router provider with mirror entries
