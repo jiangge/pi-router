@@ -721,31 +721,84 @@ ${conversationText}
 
 Provide the summary now:`;
     
-    // Call summary model (via pi's streamSimple or similar)
-    // TODO: Implement actual API call when we have access to pi's internal methods
-    // For now, return a structured placeholder
-    
     console.log("[pi-router] Generating context summary...");
     console.log(`[pi-router] From: ${fromModel.id}@${fromModel.provider}`);
     console.log(`[pi-router] To: ${toModel.id}@${toModel.provider}`);
     console.log(`[pi-router] Using summary model: ${summaryModel.id}@${summaryModel.provider}`);
     
-    // Placeholder implementation
-    const summary = `[Context Transfer Summary]
+    // Convert PiModel to pi-ai Model format
+    const realSummaryModel: Model<Api> = {
+      id: summaryModel.id,
+      provider: summaryModel.provider,
+      api: summaryModel.api as Api,
+      name: summaryModel.id,
+      baseUrl: "",
+      input: ["text"],
+      cost: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      },
+      contextWindow: 128000,
+      maxTokens: 8192,
+      compat: summaryModel.compat,
+      reasoning: summaryModel.reasoning,
+    };
+    
+    // Create context for summary request
+    const summaryContext: Context = {
+      messages: [
+        {
+          role: "user",
+          content: summaryPrompt,
+          timestamp: Date.now(),
+        },
+      ],
+    };
+    
+    // Call streamSimple to generate summary
+    const stream = streamSimple(realSummaryModel, summaryContext, undefined);
+    
+    // Collect the response
+    let summary = "";
+    let tokensUsed = 0;
+    
+    for await (const event of stream) {
+      if (event.type === "text_delta") {
+        summary += event.delta;
+      } else if (event.type === "done") {
+        // Usage info may be available in done event or elsewhere
+        // For now, estimate based on response length
+        tokensUsed = Math.ceil(summary.length / 4);
+      }
+    }
+    
+    if (!summary || summary.trim().length === 0) {
+      throw new Error("Summary generation returned empty response");
+    }
+    
+    console.log(`[pi-router] Summary generated: ${summary.length} chars, ${tokensUsed} tokens`);
+    
+    return {
+      success: true,
+      summary: summary.trim(),
+      tokensUsed,
+    };
+  } catch (err) {
+    console.error("[pi-router] Failed to generate summary:", err);
+    
+    // Fallback: return a simple summary
+    const fallbackSummary = `[Context Transfer Summary]
 Previous model: ${fromModel.id}
 Conversation length: ${messages.length} messages
 
 The user was working on a task that requires continuation with the new model ${toModel.id}.`;
     
     return {
-      success: true,
-      summary,
-      tokensUsed: 0, // Will be populated by actual API call
-    };
-  } catch (err) {
-    console.error("[pi-router] Failed to generate summary:", err);
-    return {
       success: false,
+      summary: fallbackSummary,
+      tokensUsed: 0,
       error: String(err),
     };
   }
