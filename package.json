@@ -1,0 +1,35 @@
+{
+  "name": "pi-router",
+  "version": "0.1.0",
+  "description": "Transparent two-tier router for pi coding agent — routes channels (default) + models (opt-in fallback chain). Zero protocol coupling with pi-cache-optimizer.",
+  "main": "index.ts",
+  "type": "module",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "router",
+    "failover",
+    "multi-channel",
+    "cache-optimizer"
+  ],
+  "author": "Jiang Ge",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jiangge/pi-router.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jiangge/pi-router/issues"
+  },
+  "homepage": "https://github.com/jiangge/pi-router#readme",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.79.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
