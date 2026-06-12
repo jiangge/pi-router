@@ -403,7 +403,7 @@ export default function (pi: ExtensionAPI) {
   }
   
   // Register router provider with mirror entries
-  // TODO: implement provider registration
+  registerRouterProvider(pi, config, currentModels);
   
   console.log("[pi-router] Extension loaded (v0.1.0-alpha)");
   console.log("[pi-router] Strategy:", config.strategy ?? "channelFirst");
@@ -708,4 +708,210 @@ ${summary}`;
   }
   
   return sanitized;
+}
+
+/**
+ * Router state for tracking active channels and cooldowns
+ */
+type RouterState = {
+  activeChannels: Map<string, string>;  // modelId -> current active channel
+  cooldowns: Map<string, number>;  // "modelId@channel" -> cooldown end timestamp
+  lastFailures: Map<string, { channel: string; error: string; timestamp: number }[]>;  // modelId -> failure history
+};
+
+const routerState: RouterState = {
+  activeChannels: new Map(),
+  cooldowns: new Map(),
+  lastFailures: new Map(),
+};
+
+/**
+ * Register router provider with mirror entries for configured models
+ */
+function registerRouterProvider(
+  pi: ExtensionAPI,
+  config: RouterConfig,
+  allModels: PiModel[]
+): void {
+  const configuredModels = config.models || [];
+  
+  if (configuredModels.length === 0) {
+    console.log("[pi-router] No models configured, skipping provider registration");
+    return;
+  }
+  
+  // Build a map of all available models by id@provider
+  const modelMap = new Map<string, PiModel>();
+  for (const model of allModels) {
+    const key = `${model.id}@${model.provider}`;
+    modelMap.set(key, model);
+  }
+  
+  // Register router provider with all configured models
+  const mirrorModels: any[] = [];
+  
+  for (const configModel of configuredModels) {
+    const primaryChannel = configModel.channels[0];
+    const primaryKey = `${configModel.id}@${primaryChannel}`;
+    const primaryModel = modelMap.get(primaryKey);
+    
+    if (!primaryModel) {
+      console.warn(`[pi-router] Primary model not found: ${primaryKey}`);
+      continue;
+    }
+    
+    // Create mirror model with router provider
+    mirrorModels.push({
+      id: configModel.id,
+      name: `${primaryModel.name} (router)`,
+      api: primaryModel.api,
+      reasoning: primaryModel.reasoning,
+      input: primaryModel.input,
+      contextWindow: primaryModel.contextWindow,
+      maxTokens: primaryModel.maxTokens,
+      cost: primaryModel.cost,
+      compat: primaryModel.compat,
+      thinkingLevelMap: primaryModel.thinkingLevelMap,
+    });
+    
+    console.log(`[pi-router] Configured router/${configModel.id} with ${configModel.channels.length} channels`);
+  }
+  
+  if (mirrorModels.length === 0) {
+    console.warn("[pi-router] No valid mirror models created");
+    return;
+  }
+  
+  // Register with custom streamSimple handler
+  pi.registerProvider("router", {
+    models: mirrorModels,
+    streamSimple: (model: any, context: any, options?: any) => {
+      return routeRequest(model, context, options, config, modelMap, pi);
+    },
+  });
+  
+  console.log(`[pi-router] Registered ${mirrorModels.length} router models`);
+}
+
+/**
+ * Route request through configured channels with failover
+ */
+function routeRequest(
+  routerModel: any,
+  context: any,
+  options: any,
+  config: RouterConfig,
+  modelMap: Map<string, PiModel>,
+  pi: any
+): any {
+  const modelId = routerModel.id;
+  const modelConfig = config.models?.find(m => m.id === modelId);
+  
+  if (!modelConfig) {
+    throw new Error(`[pi-router] No configuration found for ${modelId}`);
+  }
+  
+  console.log(`[pi-router] Routing request for ${modelId}`);
+  console.log(`[pi-router] Available channels: ${modelConfig.channels.join(", ")}`);
+  
+  // Determine channel order based on strategy
+  const channelOrder = determineChannelOrder(modelId, modelConfig, config);
+  
+  console.log(`[pi-router] Channel order: ${channelOrder.join(" → ")}`);
+  
+  // Try each channel in order
+  for (const channel of channelOrder) {
+    const key = `${modelId}@${channel}`;
+    
+    // Check cooldown
+    const cooldownEnd = routerState.cooldowns.get(key);
+    if (cooldownEnd && Date.now() < cooldownEnd) {
+      const remainingMs = cooldownEnd - Date.now();
+      console.log(`[pi-router] Channel ${channel} in cooldown (${Math.ceil(remainingMs / 1000)}s remaining)`);
+      continue;
+    }
+    
+    const targetModel = modelMap.get(key);
+    if (!targetModel) {
+      console.warn(`[pi-router] Model not found: ${key}`);
+      continue;
+    }
+    
+    console.log(`[pi-router] Attempting ${channel}...`);
+    
+    try {
+      // TODO: Actually call the real provider's streamSimple
+      // For now, return a placeholder
+      console.log(`[pi-router] SUCCESS: Routed to ${key}`);
+      routerState.activeChannels.set(modelId, channel);
+      
+      // Return placeholder stream
+      // Real implementation will forward to actual provider
+      return createPlaceholderStream(targetModel, context, options);
+    } catch (err) {
+      console.error(`[pi-router] Failed on ${channel}:`, err);
+      
+      // Record failure
+      if (!routerState.lastFailures.has(modelId)) {
+        routerState.lastFailures.set(modelId, []);
+      }
+      routerState.lastFailures.get(modelId)!.push({
+        channel,
+        error: String(err),
+        timestamp: Date.now(),
+      });
+      
+      // Apply cooldown
+      const cooldownMs = modelConfig.failover?.cooldownMs || config.failover?.cooldownMs || 60000;
+      routerState.cooldowns.set(key, Date.now() + cooldownMs);
+      
+      // Continue to next channel
+    }
+  }
+  
+  // All channels exhausted
+  console.error(`[pi-router] All channels exhausted for ${modelId}`);
+  throw new Error(`[pi-router] All channels failed for ${modelId}`);
+}
+
+/**
+ * Determine channel order based on strategy and config
+ */
+function determineChannelOrder(
+  modelId: string,
+  modelConfig: RouterModelConfig,
+  config: RouterConfig
+): string[] {
+  const channels = [...modelConfig.channels];
+  
+  // If sticky mode and we have an active channel, try it first
+  if (modelConfig.sticky !== false && config.sticky !== false) {
+    const activeChannel = routerState.activeChannels.get(modelId);
+    if (activeChannel && channels.includes(activeChannel)) {
+      // Move active channel to front
+      const filtered = channels.filter(c => c !== activeChannel);
+      return [activeChannel, ...filtered];
+    }
+  }
+  
+  // Otherwise use config order
+  // TODO: Implement sortBy logic (latency, cost)
+  return channels;
+}
+
+/**
+ * Create placeholder stream for testing
+ * TODO: Replace with actual provider forwarding
+ */
+function createPlaceholderStream(model: PiModel, context: any, options: any): any {
+  // This is a placeholder
+  // Real implementation will forward to the actual provider's streamSimple
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      yield {
+        type: "content",
+        content: `[pi-router placeholder] Routed to ${model.id}@${model.provider}`,
+      };
+    },
+  };
 }
