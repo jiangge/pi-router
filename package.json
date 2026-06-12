@@ -31,5 +31,8 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.79.1"
   }
 }

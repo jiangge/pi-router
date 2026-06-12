@@ -7,6 +7,8 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { streamSimple, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { Model, Api, Context, SimpleStreamOptions, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -798,12 +800,12 @@ function registerRouterProvider(
  */
 function routeRequest(
   routerModel: any,
-  context: any,
-  options: any,
+  context: Context,
+  options: SimpleStreamOptions | undefined,
   config: RouterConfig,
   modelMap: Map<string, PiModel>,
   pi: any
-): any {
+): AssistantMessageEventStream {
   const modelId = routerModel.id;
   const modelConfig = config.models?.find(m => m.id === modelId);
   
@@ -819,59 +821,16 @@ function routeRequest(
   
   console.log(`[pi-router] Channel order: ${channelOrder.join(" → ")}`);
   
-  // Try each channel in order
-  for (const channel of channelOrder) {
-    const key = `${modelId}@${channel}`;
-    
-    // Check cooldown
-    const cooldownEnd = routerState.cooldowns.get(key);
-    if (cooldownEnd && Date.now() < cooldownEnd) {
-      const remainingMs = cooldownEnd - Date.now();
-      console.log(`[pi-router] Channel ${channel} in cooldown (${Math.ceil(remainingMs / 1000)}s remaining)`);
-      continue;
-    }
-    
-    const targetModel = modelMap.get(key);
-    if (!targetModel) {
-      console.warn(`[pi-router] Model not found: ${key}`);
-      continue;
-    }
-    
-    console.log(`[pi-router] Attempting ${channel}...`);
-    
-    try {
-      // TODO: Actually call the real provider's streamSimple
-      // For now, return a placeholder
-      console.log(`[pi-router] SUCCESS: Routed to ${key}`);
-      routerState.activeChannels.set(modelId, channel);
-      
-      // Return placeholder stream
-      // Real implementation will forward to actual provider
-      return createPlaceholderStream(targetModel, context, options);
-    } catch (err) {
-      console.error(`[pi-router] Failed on ${channel}:`, err);
-      
-      // Record failure
-      if (!routerState.lastFailures.has(modelId)) {
-        routerState.lastFailures.set(modelId, []);
-      }
-      routerState.lastFailures.get(modelId)!.push({
-        channel,
-        error: String(err),
-        timestamp: Date.now(),
-      });
-      
-      // Apply cooldown
-      const cooldownMs = modelConfig.failover?.cooldownMs || config.failover?.cooldownMs || 60000;
-      routerState.cooldowns.set(key, Date.now() + cooldownMs);
-      
-      // Continue to next channel
-    }
-  }
-  
-  // All channels exhausted
-  console.error(`[pi-router] All channels exhausted for ${modelId}`);
-  throw new Error(`[pi-router] All channels failed for ${modelId}`);
+  // Create a wrapper stream that tries channels in order
+  return createFailoverStream(
+    modelId,
+    channelOrder,
+    context,
+    options,
+    config,
+    modelConfig,
+    modelMap
+  );
 }
 
 /**
@@ -900,18 +859,162 @@ function determineChannelOrder(
 }
 
 /**
- * Create placeholder stream for testing
- * TODO: Replace with actual provider forwarding
+ * Forward request to actual provider's streamSimple
  */
-function createPlaceholderStream(model: PiModel, context: any, options: any): any {
-  // This is a placeholder
-  // Real implementation will forward to the actual provider's streamSimple
-  return {
-    [Symbol.asyncIterator]: async function* () {
-      yield {
-        type: "content",
-        content: `[pi-router placeholder] Routed to ${model.id}@${model.provider}`,
-      };
-    },
+function forwardToProvider(
+  model: PiModel,
+  context: Context,
+  options?: SimpleStreamOptions
+): AssistantMessageEventStream {
+  // Convert PiModel to Model<Api> format expected by pi-ai
+  const realModel: Model<Api> = {
+    id: model.id,
+    name: model.name || model.id,
+    provider: model.provider,
+    api: (model.api || "openai-completions") as Api,
+    baseUrl: model.baseUrl || "",
+    reasoning: model.reasoning || false,
+    input: (model.input || ["text"]) as ("text" | "image")[],
+    contextWindow: model.contextWindow || 200000,
+    maxTokens: model.maxTokens || 16384,
+    cost: model.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    compat: model.compat,
+    thinkingLevelMap: model.thinkingLevelMap,
   };
+  
+  console.log(`[pi-router] Forwarding to ${model.provider} streamSimple`);
+  
+  // Forward to pi-ai's streamSimple
+  return streamSimple(realModel, context, options);
+}
+
+/**
+ * Create a failover stream that tries channels in order
+ */
+function createFailoverStream(
+  modelId: string,
+  channelOrder: string[],
+  context: Context,
+  options: SimpleStreamOptions | undefined,
+  config: RouterConfig,
+  modelConfig: RouterModelConfig,
+  modelMap: Map<string, PiModel>
+): AssistantMessageEventStream {
+  let currentChannelIndex = 0;
+  let currentStream: AssistantMessageEventStream | null = null;
+  let currentChannel: string | null = null;
+  
+  const tryNextChannel = (): AssistantMessageEventStream | null => {
+    while (currentChannelIndex < channelOrder.length) {
+      const channel = channelOrder[currentChannelIndex];
+      currentChannelIndex++;
+      
+      const key = `${modelId}@${channel}`;
+      
+      // Check cooldown
+      const cooldownEnd = routerState.cooldowns.get(key);
+      if (cooldownEnd && Date.now() < cooldownEnd) {
+        const remainingMs = cooldownEnd - Date.now();
+        console.log(`[pi-router] Channel ${channel} in cooldown (${Math.ceil(remainingMs / 1000)}s remaining)`);
+        continue;
+      }
+      
+      const targetModel = modelMap.get(key);
+      if (!targetModel) {
+        console.warn(`[pi-router] Model not found: ${key}`);
+        continue;
+      }
+      
+      console.log(`[pi-router] Attempting ${channel}...`);
+      
+      try {
+        currentChannel = channel;
+        currentStream = forwardToProvider(targetModel, context, options);
+        console.log(`[pi-router] Started stream on ${key}`);
+        routerState.activeChannels.set(modelId, channel);
+        return currentStream;
+      } catch (err) {
+        console.error(`[pi-router] Failed to start stream on ${channel}:`, err);
+        recordFailure(modelId, channel, String(err), config, modelConfig);
+      }
+    }
+    
+    return null;
+  };
+  
+  // Create event stream and handle failover asynchronously
+  const eventStream = createAssistantMessageEventStream();
+  
+  // Start async process to try channels and forward events
+  (async () => {
+    let stream = tryNextChannel();
+    
+    if (!stream) {
+      eventStream.end();
+      return;
+    }
+    
+    try {
+      for await (const event of stream) {
+        eventStream.push(event);
+      }
+      eventStream.end();
+    } catch (err) {
+      console.error(`[pi-router] Stream error on ${currentChannel}:`, err);
+      
+      if (currentChannel) {
+        recordFailure(modelId, currentChannel, String(err), config, modelConfig);
+      }
+      
+      // Try next channel
+      stream = tryNextChannel();
+      
+      if (!stream) {
+        eventStream.end();
+        return;
+      }
+      
+      // Forward events from the new stream
+      try {
+        for await (const event of stream) {
+          eventStream.push(event);
+        }
+        eventStream.end();
+      } catch (err2) {
+        console.error(`[pi-router] Secondary stream error:`, err2);
+        eventStream.end();
+      }
+    }
+  })();
+  
+  return eventStream;
+}
+
+/**
+ * Record a channel failure and apply cooldown
+ */
+function recordFailure(
+  modelId: string,
+  channel: string,
+  error: string,
+  config: RouterConfig,
+  modelConfig: RouterModelConfig
+): void {
+  const key = `${modelId}@${channel}`;
+  
+  // Record failure
+  if (!routerState.lastFailures.has(modelId)) {
+    routerState.lastFailures.set(modelId, []);
+  }
+  routerState.lastFailures.get(modelId)!.push({
+    channel,
+    error,
+    timestamp: Date.now(),
+  });
+  
+  // Apply cooldown
+  const cooldownMs = modelConfig.failover?.cooldownMs || config.failover?.cooldownMs || 60000;
+  routerState.cooldowns.set(key, Date.now() + cooldownMs);
+  
+  console.log(`[pi-router] Applied ${cooldownMs}ms cooldown to ${key}`);
 }
