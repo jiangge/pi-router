@@ -70,6 +70,7 @@ Pi-router will automatically:
 /router explain      # Show failures, latency, health, circuits
 /router decisions    # Show recent routing decisions
 /router probes       # Show background health probe results
+/router pricing      # Show per-channel pricing breakdown
 /router sync         # Check for model changes
 /router sync accept  # Apply detected changes
 ```
@@ -223,6 +224,12 @@ claude-opus-4-8 -> run-claude (1847ms) (45s ago)
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed design documentation.
 
 ## Development Status
+
+**v0.3.0-alpha** - Cost optimization:
+- ✅ Per-channel pricing with multipliers
+- ✅ Cost-based channel sorting
+- ✅ Free self-hosted channel detection
+- ✅ /router pricing command
 
 **v0.2.0-alpha** - Enhanced features:
 - ✅ Real AI summary generation

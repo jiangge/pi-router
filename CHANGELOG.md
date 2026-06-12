@@ -5,6 +5,38 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0-alpha] - 2026-06-12
+
+### Added
+
+#### Per-Channel Pricing
+- Base model pricing from official providers
+- Channel pricing multipliers for different providers
+- Free pricing for self-hosted channels (lan, local)
+- Cost-based channel sorting (prefer free/cheap channels)
+- Real cost estimation for routing decisions
+- `/router pricing` command to view pricing breakdown
+
+#### Enhanced Cost Optimization
+- getChannelPricing(): Effective pricing per model@channel
+- estimateRequestCost(): Calculate costs with cache tokens
+- sortChannelsByCost(): Intelligent cost-based sorting
+- Cost tracking in routing decisions
+
+### Channel Types
+- Official providers (1.0x): anthropic, openai, google
+- Third-party aggregators (1.05x-1.1x): openrouter, together, fireworks
+- Self-hosted (0.0x free): lan, local, self-hosted
+- Custom channels (configurable)
+
+### Technical Details
+- CHANNEL_PRICING_MULTIPLIERS configuration
+- Weighted cost calculation (typical usage pattern)
+- Cost field in RoutingDecision type
+- Transparent cost visibility
+
+---
+
 ## [0.2.0-alpha] - 2026-06-12
 
 ### Added

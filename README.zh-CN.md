@@ -70,6 +70,7 @@ Pi-router 会自动：
 /router explain      # 显示故障、延迟、健康、熔断器状态
 /router decisions    # 显示最近的路由决策
 /router probes       # 显示后台健康探测结果
+/router pricing      # 显示每个通道的定价明细
 /router sync         # 检查模型变更
 /router sync accept  # 应用检测到的变更
 ```
@@ -224,6 +225,12 @@ claude-opus-4-8 -> run-claude (1847ms)（45秒前）
 
 ## 开发状态
 
+**v0.3.0-alpha** - 成本优化：
+- ✅ 按通道定价与倍率
+- ✅ 基于成本的通道排序
+- ✅ 免费自建通道检测
+- ✅ /router pricing 命令
+
 **v0.2.0-alpha** - 增强功能：
 - ✅ 真实 AI 摘要生成
 - ✅ 后台健康探测
@@ -239,8 +246,8 @@ claude-opus-4-8 -> run-claude (1847ms)（45秒前）
 - ✅ 决策日志
 - ✅ 完整命令集
 
-**v0.3.0** - 计划中：
-- 按通道定价
+**v0.4.0** - 计划中：
+- 单元测试
 - 决策分析
 - 单元测试
 
