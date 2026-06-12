@@ -546,6 +546,53 @@ export default function (pi: ExtensionAPI) {
         lines.push("Run '/router sync' to see detailed changes");
         
         ctx.ui.notify(lines.join("\n"), "info");
+      } else if (subcommand === "explain") {
+        // Show failure history and router state
+        const lines: string[] = ["Router State:", ""];
+        
+        // Active channels
+        lines.push("Active Channels:");
+        if (routerState.activeChannels.size === 0) {
+          lines.push("  (none)");
+        } else {
+          for (const [modelId, channel] of routerState.activeChannels.entries()) {
+            lines.push(`  ${modelId} → ${channel}`);
+          }
+        }
+        lines.push("");
+        
+        // Cooldowns
+        lines.push("Active Cooldowns:");
+        const now = Date.now();
+        let cooldownCount = 0;
+        for (const [key, endTime] of routerState.cooldowns.entries()) {
+          if (endTime > now) {
+            const remainingMs = endTime - now;
+            lines.push(`  ${key}: ${Math.ceil(remainingMs / 1000)}s remaining`);
+            cooldownCount++;
+          }
+        }
+        if (cooldownCount === 0) {
+          lines.push("  (none)");
+        }
+        lines.push("");
+        
+        // Recent failures
+        lines.push("Recent Failures (last 10):");
+        let totalFailures = 0;
+        for (const [modelId, failures] of routerState.lastFailures.entries()) {
+          const recent = failures.slice(-10);
+          totalFailures += recent.length;
+          recent.forEach(f => {
+            const ago = Math.floor((now - f.timestamp) / 1000);
+            lines.push(`  ${modelId}@${f.channel} (${ago}s ago): ${f.error.substring(0, 60)}`);
+          });
+        }
+        if (totalFailures === 0) {
+          lines.push("  (none)");
+        }
+        
+        ctx.ui.notify(lines.join("\n"), "info");
       } else {
         ctx.ui.notify(
           "pi-router v0.1.0-alpha\n\n" +
@@ -853,8 +900,31 @@ function determineChannelOrder(
     }
   }
   
-  // Otherwise use config order
-  // TODO: Implement sortBy logic (latency, cost)
+  // Determine sort strategy
+  const sortBy = modelConfig.sortBy || config.sortBy || "config";
+  
+  if (sortBy === "config") {
+    // Use config order as-is
+    return channels;
+  }
+  
+  if (sortBy === "latency") {
+    // Sort by latency (lower is better)
+    // TODO: Implement actual latency tracking
+    console.log("[pi-router] Latency sorting not yet implemented, using config order");
+    return channels;
+  }
+  
+  if (sortBy === "cost" || sortBy === "costFirst") {
+    // Sort by cost (lower is better)
+    return sortChannelsByCost(modelId, channels);
+  }
+  
+  if (sortBy === "capabilityFirst") {
+    // Sort by capability score (higher is better)
+    return sortChannelsByCapability(modelId, channels);
+  }
+  
   return channels;
 }
 
@@ -1166,4 +1236,45 @@ async function tryL2ModelFallback(
   // All fallback attempts exhausted
   console.error(`[pi-router] All L1 and L2 fallback attempts exhausted for ${modelId}`);
   eventStream.end();
+}
+
+/**
+ * Sort channels by cost (lower cost first)
+ */
+function sortChannelsByCost(modelId: string, channels: string[]): string[] {
+  const pricing = REFERENCE_PRICING[modelId];
+  
+  if (!pricing) {
+    console.log(`[pi-router] No pricing data for ${modelId}, using config order`);
+    return channels;
+  }
+  
+  // Calculate weighted cost for each channel
+  // In reality, different channels may have different pricing, but for now we assume same pricing per model
+  // TODO: Add per-channel pricing data
+  
+  // For now, just return config order since we don't have per-channel pricing
+  console.log(`[pi-router] Per-channel pricing not available, using config order`);
+  return channels;
+}
+
+/**
+ * Sort channels by capability score (higher capability first)
+ */
+function sortChannelsByCapability(modelId: string, channels: string[]): string[] {
+  const capability = CAPABILITY_SCORES[modelId];
+  
+  if (!capability) {
+    console.log(`[pi-router] No capability data for ${modelId}, using config order`);
+    return channels;
+  }
+  
+  console.log(`[pi-router] Model ${modelId} has capability score: ${capability}`);
+  
+  // For capabilityFirst, we prefer higher-quality providers
+  // In practice, this means providers with better reliability/uptime
+  // Since we don't have per-provider quality data yet, just return config order
+  // TODO: Track provider reliability and sort by it
+  
+  return channels;
 }
