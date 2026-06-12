@@ -591,6 +591,36 @@ export default function (pi: ExtensionAPI) {
         if (totalFailures === 0) {
           lines.push("  (none)");
         }
+        lines.push("");
+        
+        // Latency stats
+        lines.push("Channel Latency (avg last 10):");
+        let latencyCount = 0;
+        for (const [key, records] of latencyTracker.records.entries()) {
+          if (records.length > 0) {
+            const avg = records.reduce((sum, r) => sum + r.latencyMs, 0) / records.length;
+            lines.push(`  ${key}: ${avg.toFixed(0)}ms (${records.length} samples)`);
+            latencyCount++;
+          }
+        }
+        if (latencyCount === 0) {
+          lines.push("  (no data yet)");
+        }
+        lines.push("");
+        
+        // Health status
+        lines.push("Channel Health:");
+        let healthCount = 0;
+        for (const [key, status] of healthChecker.status.entries()) {
+          const statusStr = status.healthy ? "✓ healthy" : "✗ unhealthy";
+          const failStr = status.consecutiveFailures > 0 ? ` (${status.consecutiveFailures} failures)` : "";
+          const ago = Math.floor((now - status.lastCheck) / 1000);
+          lines.push(`  ${key}: ${statusStr}${failStr} (checked ${ago}s ago)`);
+          healthCount++;
+        }
+        if (healthCount === 0) {
+          lines.push("  (no data yet)");
+        }
         
         ctx.ui.notify(lines.join("\n"), "info");
       } else {
@@ -910,9 +940,7 @@ function determineChannelOrder(
   
   if (sortBy === "latency") {
     // Sort by latency (lower is better)
-    // TODO: Implement actual latency tracking
-    console.log("[pi-router] Latency sorting not yet implemented, using config order");
-    return channels;
+    return sortChannelsByLatency(modelId, channels);
   }
   
   if (sortBy === "cost" || sortBy === "costFirst") {
@@ -1015,6 +1043,9 @@ function createFailoverStream(
   // Create event stream and handle failover asynchronously
   const eventStream = createAssistantMessageEventStream();
   
+  // Track timing for latency measurement
+  let streamStartTime = 0;
+  
   // Start async process to try channels and forward events
   (async () => {
     let stream = tryNextChannel();
@@ -1034,8 +1065,18 @@ function createFailoverStream(
       return;
     }
     
+    streamStartTime = Date.now();
+    
     try {
+      let firstEvent = true;
       for await (const event of stream) {
+        // Record latency on first event (time to first token)
+        if (firstEvent && currentChannel) {
+          const latency = Date.now() - streamStartTime;
+          recordLatency(modelId, currentChannel, latency);
+          updateHealthStatus(modelId, currentChannel, true);
+          firstEvent = false;
+        }
         eventStream.push(event);
       }
       eventStream.end();
@@ -1044,6 +1085,7 @@ function createFailoverStream(
       
       if (currentChannel) {
         recordFailure(modelId, currentChannel, String(err), config, modelConfig);
+        updateHealthStatus(modelId, currentChannel, false);
       }
       
       // Try next channel
@@ -1064,14 +1106,27 @@ function createFailoverStream(
         return;
       }
       
+      // Reset timing for new channel
+      streamStartTime = Date.now();
+      
       // Forward events from the new stream
       try {
+        let firstEvent = true;
         for await (const event of stream) {
+          if (firstEvent && currentChannel) {
+            const latency = Date.now() - streamStartTime;
+            recordLatency(modelId, currentChannel, latency);
+            updateHealthStatus(modelId, currentChannel, true);
+            firstEvent = false;
+          }
           eventStream.push(event);
         }
         eventStream.end();
       } catch (err2) {
         console.error(`[pi-router] Secondary stream error:`, err2);
+        if (currentChannel) {
+          updateHealthStatus(modelId, currentChannel, false);
+        }
         // Try L2 fallback as last resort
         await tryL2ModelFallback(
           modelId,
@@ -1277,4 +1332,159 @@ function sortChannelsByCapability(modelId: string, channels: string[]): string[]
   // TODO: Track provider reliability and sort by it
   
   return channels;
+}
+
+/**
+ * Latency tracking for channel performance
+ */
+type LatencyRecord = {
+  channel: string;
+  latencyMs: number;
+  timestamp: number;
+};
+
+type LatencyTracker = {
+  records: Map<string, LatencyRecord[]>; // "modelId@channel" -> recent latencies
+  maxRecords: number; // Keep last N measurements
+};
+
+const latencyTracker: LatencyTracker = {
+  records: new Map(),
+  maxRecords: 10, // Keep last 10 measurements per channel
+};
+
+/**
+ * Record latency for a channel
+ */
+function recordLatency(modelId: string, channel: string, latencyMs: number): void {
+  const key = `${modelId}@${channel}`;
+  
+  if (!latencyTracker.records.has(key)) {
+    latencyTracker.records.set(key, []);
+  }
+  
+  const records = latencyTracker.records.get(key)!;
+  records.push({
+    channel,
+    latencyMs,
+    timestamp: Date.now(),
+  });
+  
+  // Keep only recent measurements
+  if (records.length > latencyTracker.maxRecords) {
+    records.shift();
+  }
+  
+  console.log(`[pi-router] Recorded latency for ${key}: ${latencyMs}ms`);
+}
+
+/**
+ * Get average latency for a channel
+ */
+function getAverageLatency(modelId: string, channel: string): number | null {
+  const key = `${modelId}@${channel}`;
+  const records = latencyTracker.records.get(key);
+  
+  if (!records || records.length === 0) {
+    return null;
+  }
+  
+  const sum = records.reduce((acc, r) => acc + r.latencyMs, 0);
+  return sum / records.length;
+}
+
+/**
+ * Sort channels by latency (lower is better)
+ */
+function sortChannelsByLatency(modelId: string, channels: string[]): string[] {
+  const channelLatencies = channels.map(channel => {
+    const avgLatency = getAverageLatency(modelId, channel);
+    return {
+      channel,
+      latency: avgLatency ?? Infinity, // Unknown latencies go last
+    };
+  });
+  
+  // Sort by latency (ascending)
+  channelLatencies.sort((a, b) => a.latency - b.latency);
+  
+  const sorted = channelLatencies.map(c => c.channel);
+  console.log(
+    `[pi-router] Latency-sorted channels for ${modelId}:`,
+    sorted.map((c, i) => {
+      const lat = channelLatencies[i].latency;
+      return lat === Infinity ? `${c}(unknown)` : `${c}(${lat.toFixed(0)}ms)`;
+    }).join(", ")
+  );
+  
+  return sorted;
+}
+
+/**
+ * Health check system for periodic channel monitoring
+ */
+type HealthCheckStatus = {
+  channel: string;
+  healthy: boolean;
+  lastCheck: number;
+  consecutiveFailures: number;
+};
+
+type HealthChecker = {
+  status: Map<string, HealthCheckStatus>; // "modelId@channel" -> status
+  intervalMs: number;
+  enabled: boolean;
+};
+
+const healthChecker: HealthChecker = {
+  status: new Map(),
+  intervalMs: 60000, // Check every 60s
+  enabled: false, // Disabled by default (will enable in v0.2)
+};
+
+/**
+ * Mark channel health status
+ */
+function updateHealthStatus(
+  modelId: string,
+  channel: string,
+  healthy: boolean
+): void {
+  const key = `${modelId}@${channel}`;
+  const current = healthChecker.status.get(key);
+  
+  if (!current) {
+    healthChecker.status.set(key, {
+      channel,
+      healthy,
+      lastCheck: Date.now(),
+      consecutiveFailures: healthy ? 0 : 1,
+    });
+  } else {
+    current.healthy = healthy;
+    current.lastCheck = Date.now();
+    current.consecutiveFailures = healthy ? 0 : current.consecutiveFailures + 1;
+  }
+  
+  console.log(`[pi-router] Health status updated: ${key} = ${healthy ? 'healthy' : 'unhealthy'}`);
+}
+
+/**
+ * Get health status for a channel
+ */
+function isChannelHealthy(modelId: string, channel: string): boolean {
+  const key = `${modelId}@${channel}`;
+  const status = healthChecker.status.get(key);
+  
+  // If no health data, assume healthy
+  if (!status) {
+    return true;
+  }
+  
+  // Mark unhealthy if 3+ consecutive failures
+  if (status.consecutiveFailures >= 3) {
+    return false;
+  }
+  
+  return status.healthy;
 }
