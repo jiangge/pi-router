@@ -69,6 +69,7 @@ Pi-router 会自动：
 /router list         # 列出可用模型
 /router explain      # 显示故障、延迟、健康、熔断器状态
 /router decisions    # 显示最近的路由决策
+/router probes       # 显示后台健康探测结果
 /router sync         # 检查模型变更
 /router sync accept  # 应用检测到的变更
 ```
@@ -186,6 +187,12 @@ claude-opus-4-8 -> run-claude (1847ms)（45秒前）
   "summaryPrompt": "...",         // 自定义摘要提示词
   "failover": {
     "cooldownMs": 60000           // 冷却时长（默认 60 秒）
+  },
+  "healthProbe": {
+    "enabled": true,              // 启用后台健康探测
+    "intervalMs": 300000,         // 探测间隔（默认 5 分钟）
+    "timeoutMs": 10000,           // 探测超时（默认 10 秒）
+    "probeMessage": "ping"         // 简单测试消息
   }
 }
 ```
@@ -217,6 +224,12 @@ claude-opus-4-8 -> run-claude (1847ms)（45秒前）
 
 ## 开发状态
 
+**v0.2.0-alpha** - 增强功能：
+- ✅ 真实 AI 摘要生成
+- ✅ 后台健康探测
+- ✅ 主动熔断器恢复
+- ✅ 增强的可观测性
+
 **v0.1.0-alpha** - 核心功能完成：
 - ✅ L1 通道故障转移
 - ✅ L2 模型降级
@@ -226,10 +239,8 @@ claude-opus-4-8 -> run-claude (1847ms)（45秒前）
 - ✅ 决策日志
 - ✅ 完整命令集
 
-**v0.2.0** - 计划中：
-- 后台健康探测
+**v0.3.0** - 计划中：
 - 按通道定价
-- 真实 AI 摘要生成
 - 决策分析
 - 单元测试
 

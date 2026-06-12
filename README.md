@@ -69,6 +69,7 @@ Pi-router will automatically:
 /router list         # List available models
 /router explain      # Show failures, latency, health, circuits
 /router decisions    # Show recent routing decisions
+/router probes       # Show background health probe results
 /router sync         # Check for model changes
 /router sync accept  # Apply detected changes
 ```
@@ -186,6 +187,12 @@ claude-opus-4-8 -> run-claude (1847ms) (45s ago)
   "summaryPrompt": "...",         // Custom summary prompt
   "failover": {
     "cooldownMs": 60000           // Cooldown duration (default 60s)
+  },
+  "healthProbe": {
+    "enabled": true,              // Enable background health probes
+    "intervalMs": 300000,         // Probe interval (default 5 min)
+    "timeoutMs": 10000,           // Probe timeout (default 10s)
+    "probeMessage": "ping"         // Simple test message
   }
 }
 ```
@@ -216,6 +223,12 @@ claude-opus-4-8 -> run-claude (1847ms) (45s ago)
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed design documentation.
 
 ## Development Status
+
+**v0.2.0-alpha** - Enhanced features:
+- ✅ Real AI summary generation
+- ✅ Background health probes
+- ✅ Proactive circuit breaker recovery
+- ✅ Enhanced observability
 
 **v0.1.0-alpha** - Core features complete:
 - ✅ L1 channel failover

@@ -5,6 +5,41 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-alpha] - 2026-06-12
+
+### Added
+
+#### Real AI Summary Generation
+- Connect to actual AI model via streamSimple for context summaries
+- Use configured summary model (cheap models recommended)
+- Stream response and collect text_delta events
+- Estimate token usage based on response length
+- Graceful fallback on errors
+
+#### Background Health Probes
+- Periodic lightweight requests to check channel availability
+- Configurable interval (default: 5 minutes)
+- Configurable timeout (default: 10 seconds)
+- Simple probe message (default: "ping")
+- Automatic probe scheduling for all channels
+- Proactive circuit breaker recovery detection
+- `/router probes` command to view probe results
+
+### Configuration
+- Added `healthProbe` configuration section:
+  - `enabled`: Enable/disable probes
+  - `intervalMs`: Probe interval in milliseconds
+  - `timeoutMs`: Probe timeout in milliseconds
+  - `probeMessage`: Custom probe message
+
+### Technical Details
+- Real AI API integration via pi-ai streamSimple
+- Event-driven probe execution with async/await
+- Automatic timer management and cleanup
+- Integration with circuit breaker and health monitoring
+
+---
+
 ## [0.1.0-alpha] - 2026-06-12
 
 ### Added
