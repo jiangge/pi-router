@@ -277,10 +277,21 @@ function calculateFileHash(filePath: string): string {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
+// Cache for loaded models to avoid re-parsing on every call
+let modelsCache: PiModel[] | null = null;
+let modelsCacheTimestamp = 0;
+const CACHE_TTL = 60000; // 1 minute cache
+
 /**
- * Load models from models.json
+ * Load models from models.json (with caching)
  */
 function loadModelsJson(): PiModel[] {
+  // Return cached models if still valid
+  const now = Date.now();
+  if (modelsCache && (now - modelsCacheTimestamp < CACHE_TTL)) {
+    return modelsCache;
+  }
+  
   const modelsPath = getModelsJsonPath();
   if (!fs.existsSync(modelsPath)) {
     console.warn("[pi-router] models.json not found:", modelsPath);
@@ -316,6 +327,10 @@ function loadModelsJson(): PiModel[] {
         });
       }
     }
+    
+    // Update cache
+    modelsCache = allModels;
+    modelsCacheTimestamp = now;
     
     return allModels;
   } catch (err) {

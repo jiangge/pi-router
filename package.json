@@ -31,7 +31,9 @@
     "observability"
   ],
   "pi": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "author": "Jiang Jilin",
   "license": "MIT",
@@ -51,14 +53,18 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "typescript": "^5.0.0"
+    "@vitest/coverage-v8": "^4.1.8",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.8"
   },
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.79.1"
