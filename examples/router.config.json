@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jiangge/pi-router/main/schema.json",
+  "strategy": "channelFirst",
+  "auto": true,
+  "sticky": true,
+  "sortBy": "cost",
+  "contextTransfer": "summary",
+  "summaryModel": "claude-haiku-4-5@anthropic",
+  "summaryPrompt": "Summarize the conversation focusing on key decisions and current context. Keep it under 500 tokens.",
+  "logDir": "~/.pi/agent/logs/router",
+  "autoSync": true,
+  "failover": {
+    "on": ["ECONNREFUSED", "ETIMEDOUT", "rate_limit_error", "overloaded_error"],
+    "cooldownMs": 60000
+  },
+  "healthProbe": {
+    "enabled": true,
+    "intervalMs": 300000,
+    "timeoutMs": 10000,
+    "probeMessage": "ping"
+  },
+  "models": [
+    {
+      "id": "claude-opus-4-8",
+      "channels": ["lan", "anthropic", "openrouter"],
+      "sortBy": "cost",
+      "sticky": true,
+      "contextTransfer": "summary",
+      "fallbackModels": [
+        {
+          "id": "claude-sonnet-4-6",
+          "channels": ["lan", "anthropic"]
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "channels": ["anthropic"]
+        }
+      ],
+      "failover": {
+        "on": ["ECONNREFUSED", "ETIMEDOUT", "rate_limit_error", "overloaded_error"],
+        "cooldownMs": 30000
+      }
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "channels": ["lan", "anthropic", "openrouter"],
+      "sortBy": "latency",
+      "fallbackModels": [
+        {
+          "id": "claude-haiku-4-5",
+          "channels": ["anthropic"]
+        }
+      ]
+    },
+    {
+      "id": "gpt-5",
+      "channels": ["openai", "openrouter"],
+      "sortBy": "cost",
+      "fallbackModels": [
+        {
+          "id": "gpt-4o",
+          "channels": ["openai"]
+        }
+      ]
+    }
+  ]
+}

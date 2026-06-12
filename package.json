@@ -7,15 +7,19 @@
   "type": "module",
   "files": [
     "dist",
+    "examples",
     "README.md",
     "README.zh-CN.md",
     "LICENSE",
     "INSTALL.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "ARCHITECTURE.md",
+    "TESTING.md"
   ],
   "keywords": [
-    "pi",
+    "pi-package",
     "pi-extension",
+    "pi",
     "router",
     "failover",
     "multi-channel",
@@ -26,6 +30,9 @@
     "claude",
     "observability"
   ],
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
   "author": "Jiang Ge",
   "license": "MIT",
   "repository": {

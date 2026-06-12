@@ -1,0 +1,10 @@
+{
+  "strategy": "channelFirst",
+  "auto": true,
+  "models": [
+    {
+      "id": "claude-opus-4-8",
+      "channels": ["anthropic", "openrouter"]
+    }
+  ]
+}
