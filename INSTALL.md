@@ -38,7 +38,13 @@ pi install ./pi-router
 
 ## Configuration
 
-Create configuration file at `~/.pi/agent/router.config.json`:
+Recommended configuration method:
+
+```bash
+/router config wizard
+```
+
+Or create configuration file manually at `~/.pi/agent/pi-router.json`:
 
 ### Minimal Configuration
 
@@ -69,19 +75,16 @@ pi list
 # Should show: pi-router@0.3.0-alpha.1
 ```
 
-Start pi:
+Start pi, then verify the command is available:
 
 ```bash
-pi
+/router config show
 ```
 
-You should see:
+Normal startup is quiet by default. For debug logs only:
 
-```
-[pi-router] Extension loaded (v0.3.0-alpha)
-[pi-router] Strategy: channelFirst
-[pi-router] Configured models: X
-[pi-router] /router command registered
+```bash
+PI_ROUTER_DEBUG=1 pi
 ```
 
 ---
@@ -140,10 +143,10 @@ pi remove git:github.com/jiangjilin/pi-router
 pi remove /path/to/pi-router
 ```
 
-The configuration file (`~/.pi/agent/router.config.json`) will remain. Delete it manually if needed:
+The configuration files will remain. Delete them manually if needed:
 
 ```bash
-rm ~/.pi/agent/router.config.json
+rm -f ~/.pi/agent/pi-router.json ~/.pi/agent/pi-router.README.md
 ```
 
 ---
@@ -168,7 +171,7 @@ rm ~/.pi/agent/router.config.json
 
 Pi-router works without configuration (auto-discovery mode). To use custom configuration:
 
-1. Create `~/.pi/agent/router.config.json`
+1. Create `~/.pi/agent/pi-router.json`
 2. Add at least `strategy` and `models`
 3. Restart pi or `/reload`
 
@@ -176,9 +179,11 @@ Pi-router works without configuration (auto-discovery mode). To use custom confi
 
 If `/router` commands are not available:
 
-1. Verify extension is loaded (check startup logs)
+1. Verify installation with `pi list`
 2. Try `/reload`
-3. Check for conflicts with other extensions
+3. Restart pi
+4. Check for conflicts with other extensions
+5. Use `PI_ROUTER_DEBUG=1 pi` to inspect debug logs
 
 ---
 
@@ -211,9 +216,11 @@ npm run build
 # Method 1: Using pi install
 pi install .
 
-# Method 2: Symlink (for development)
-ln -sf $(pwd) ~/.pi/agent/extensions/pi-router
+# Method 2: Symlink package root (for development)
+ln -sfn $(pwd) ~/.pi/agent/extensions/pi-router
 ```
+
+Use the package root, not `dist/`. The package root lets pi identify the extension as `pi-router` instead of `dist`.
 
 ### 5. Watch Mode (for development)
 
@@ -239,7 +246,7 @@ Use PowerShell or Command Prompt:
 pi install npm:pi-router
 ```
 
-Configuration file location: `%USERPROFILE%\.pi\agent\router.config.json`
+Configuration file location: `%USERPROFILE%\.pi\agent\pi-router.json`
 
 ---
 

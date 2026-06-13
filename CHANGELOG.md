@@ -5,6 +5,112 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-06-13
+
+### Added
+
+#### Auto Router Mode (`router/auto`)
+- **Virtual model `router/auto`**: Full automatic routing through all configured models and channels
+- **channelFirst strategy**: Try all channels of model A, then all channels of model B, etc.
+- **custom strategy** (renamed from modelFirst): Fully customizable order for all model@channel pairs
+  - Uses `customOrder` array in config file for explicit ordering
+  - Config wizard provides flat list editor for drag-and-drop reordering
+  - Initial order generated using "modelFirst" logic (all models' channel[0], then all models' channel[1], etc.)
+- **Persistent sticky routing**: Remember the last successful model@channel across restarts
+  - On success: update sticky record (debounced 5s file write)
+  - On failure: clear sticky, fall back to normal strategy
+  - `/router sticky` command to view/clear sticky records
+- **Footer status**: Show active channel via `setStatus` (e.g., `via anthropic`)
+- **Model select event**: Clear footer status when switching away from router models
+
+#### Configuration Wizard Enhancements
+- **Three editor modes**: 
+  - channelFirst: Two-tier editor (model order + channel order per model)
+  - custom: Flat editor (all model@channel pairs in one customizable list)
+- **Flat order editor** (`FlatOrderEditor`): New component for custom strategy
+  - Shows all model@channel combinations in a flat list
+  - Support arbitrary position swapping
+  - Viewport scrolling for long lists
+- **Better error reporting**: Detailed failure summary when all channels exhausted
+- **Footer status updates**: Show active channel immediately when attempting, not just on success
+
+#### Interactive Menus and Tab Completion
+- **Interactive main menu**: `/router` without args opens SelectList with all subcommands
+- **Interactive config submenu**: `/router config` without args opens wizard/show/reset menu
+- **Two-level tab completion**: First level (9 subcommands), second level (config sub-commands)
+- **Trailing space detection**: Proper handling of `"config "` vs `"config"` for tab trigger
+
+#### New Commands
+- `/router sticky` — View current sticky routing records
+- `/router sticky clear` — Clear all sticky records (re-route from beginning)
+- `/router sticky clear <modelId>` — Clear specific model's sticky record
+
+#### Interactive Configuration Wizard
+- **Configuration wizard command**: `/router config wizard` - 6-step guided setup
+- **Smart channel classification**: Auto-detect OAuth, free/self-hosted, and aggregator channels
+  - Scan auth.json for OAuth providers
+  - Check baseUrl for local addresses (localhost, 192.168.x.x, etc.)
+  - Match official domains (api.anthropic.com, api.openai.com, etc.)
+  - Default to aggregator for third-party platforms
+- **Intelligent channel sorting**: Auto-sort by latency, capability, or cost
+  - Latency priority: aggregator > OAuth > local
+  - Capability priority: OAuth > aggregator > self-hosted
+  - Cost priority: self-hosted > aggregator > OAuth
+- **Interactive channel order adjustment**: 
+  - Browse mode: navigate with arrow keys
+  - Enter to select channel for moving
+  - Arrow keys to move selected channel
+  - Enter again to confirm position
+  - Tab to switch between models
+- **Configuration commands**:
+  - `/router config wizard` (or `/router config w`) - Run setup wizard
+  - `/router config show` (or `/router config s`) - Display current configuration
+  - `/router config reset` (or `/router config r`) - Reset to defaults
+- **Shortcut support**: Type command prefixes (w, s, r) for quick access
+- **Auto-discovery**: Automatically find multi-channel models from models.json
+- **Smart defaults**: Intelligent default values for advanced settings
+
+#### Configuration Features
+- Wizard steps:
+  1. Routing strategy (channelFirst / modelFirst)
+  2. Sort strategy (latency / capabilityFirst / cost / manual)
+  3. Auto-sync (enable / disable)
+  4. Health probe (10min interval / disabled)
+  5. Sticky mode (enable / disable)
+  6. Channel order adjustment (interactive editor)
+- Channel classification based on:
+  - auth.json entries (OAuth authentication)
+  - baseUrl patterns (local vs remote)
+  - Official domain matching
+- Real-time channel scoring and sorting
+- User-adjustable channel order with visual feedback
+- Completion summary with configuration preview
+
+### Performance
+
+#### Startup Optimization (40-80% faster)
+- **Smart File Hash Caching**: Cache file hashes based on mtime, avoiding redundant SHA-256 calculations
+- **Eliminated Redundant Model Loading**: Load models.json only once during initialization
+- **Conditional Hash Calculation**: Only calculate file hash when autoSync is enabled
+- **Deferred Health Probes**: Start health probes 1 second after initialization to avoid blocking startup
+- **Optimized needsModelData Logic**: Include hasConfiguredModels to reduce redundant checks
+
+#### Performance Improvements by Scenario
+- Cold cache (first start): ~40% faster (50-80ms → 30-50ms)
+- Hot cache (subsequent starts): ~80% faster (50-80ms → 5-15ms)
+- With autoSync disabled: ~80% faster (30-50ms → 5-10ms)
+- With healthProbe disabled: ~75% faster (40-60ms → 5-15ms)
+
+#### Technical Details
+- `fileHashCache`: Map-based cache with mtime tracking
+- File I/O reduction: 50% fewer models.json reads
+- Hash calculation (hot): 95% faster (full read → stat only)
+- Non-blocking initialization: Health probes deferred by 1s
+
+See [PERFORMANCE_OPTIMIZATION.md](PERFORMANCE_OPTIMIZATION.md) for detailed analysis.
+
+---
+
 ## [0.3.0-alpha] - 2026-06-12
 
 ### Added
@@ -12,7 +118,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Per-Channel Pricing
 - Base model pricing from official providers
 - Channel pricing multipliers for different providers
-- Free pricing for self-hosted channels (lan, local)
+- Free pricing for self-hosted channels (for example, local/self-hosted providers)
 - Cost-based channel sorting (prefer free/cheap channels)
 - Real cost estimation for routing decisions
 - `/router pricing` command to view pricing breakdown
@@ -26,7 +132,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Channel Types
 - Official providers (1.0x): anthropic, openai, google
 - Third-party aggregators (1.05x-1.1x): openrouter, together, fireworks
-- Self-hosted (0.0x free): lan, local, self-hosted
+- Self-hosted (0.0x free): local, self-hosted
 - Custom channels (configurable)
 
 ### Technical Details
@@ -84,7 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async failover stream with seamless channel switching
 
 #### Channel Failover
-- Same model, different providers (lan → n1-claude → run-claude)
+- Same model, different providers (Provider-A → Provider-B → Provider-C)
 - Stream-level error catching and failover
 - Cooldown mechanism (60s default, configurable)
 - Sticky mode for cache preservation
@@ -93,7 +199,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Model Fallback
 - Cross-model failover with context transfer
 - Three transfer modes: none / full / summary
-- AI-generated conversation summaries (~500 tokens)
+- AI-generated conversation summaries (default target ~2000 tokens, only when needed)
 - Context sanitization for compatibility
 - Fallback chain support (primary → fallback1 → fallback2 → ...)
 

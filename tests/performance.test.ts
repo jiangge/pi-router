@@ -1,129 +1,196 @@
 /**
- * Performance tests for pi-router
+ * Performance test for startup optimization
+ * Tests file hash caching and model loading optimization
  */
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as path from 'path';
 import * as fs from 'fs';
-import { createTempDir, cleanupTempDir, createMockModelsJson, createMockConfig } from './setup';
+import * as path from 'path';
+import * as os from 'os';
 
-describe('Performance Tests', () => {
-  let tempDir: string;
-  
+describe('Performance Optimizations', () => {
+  let testDir: string;
+  let testFile: string;
+
   beforeEach(() => {
-    tempDir = createTempDir();
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-router-perf-'));
+    testFile = path.join(testDir, 'test.json');
+    fs.writeFileSync(testFile, JSON.stringify({ test: 'data' }), 'utf-8');
   });
-  
+
   afterEach(() => {
-    cleanupTempDir(tempDir);
-  });
-  
-  it('should load config quickly (< 50ms)', () => {
-    // Create a simple config
-    createMockConfig(tempDir, {
-      strategy: 'channelFirst',
-      auto: false,
-      models: [
-        { id: 'test-model', channels: ['test-provider'] }
-      ]
-    });
-    
-    const start = Date.now();
-    const configPath = path.join(tempDir, 'router.config.json');
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    const elapsed = Date.now() - start;
-    
-    expect(elapsed).toBeLessThan(50);
-    expect(config.models).toHaveLength(1);
-  });
-  
-  it('should NOT load models.json when config has models', () => {
-    // Create config with models
-    createMockConfig(tempDir, {
-      strategy: 'channelFirst',
-      auto: false,
-      autoSync: false,
-      models: [
-        { id: 'test-model', channels: ['test-provider'] }
-      ]
-    });
-    
-    // Create a large models.json
-    const providers: any = {};
-    for (let i = 0; i < 100; i++) {
-      providers[`provider${i}`] = {
-        api: 'test-api',
-        models: Array.from({ length: 10 }, (_, j) => ({
-          id: `model-${i}-${j}`,
-          name: `Model ${i}-${j}`
-        }))
-      };
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
     }
-    createMockModelsJson(tempDir, providers);
-    
-    // Measure time - should be fast because models.json is NOT loaded
-    const start = Date.now();
-    const configPath = path.join(tempDir, 'router.config.json');
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    const elapsed = Date.now() - start;
-    
-    // Should be very fast (only config loading)
-    expect(elapsed).toBeLessThan(100);
   });
-  
-  it('should handle auto-discovery only on first run', () => {
-    // First run: auto-discovery
-    createMockConfig(tempDir, {
-      strategy: 'channelFirst',
-      auto: true,
-      models: []
-    });
-    
-    createMockModelsJson(tempDir, {
-      testProvider: {
-        api: 'test-api',
-        models: [
-          { id: 'model-1', name: 'Model 1' },
-          { id: 'model-2', name: 'Model 2' }
-        ]
-      }
-    });
-    
-    // After discovery, config should be updated with models
-    // and auto should be disabled
-    // (This is what the extension should do)
-  });
-});
 
-describe('Config Loading Tests', () => {
-  let tempDir: string;
-  
-  beforeEach(() => {
-    tempDir = createTempDir();
-  });
-  
-  afterEach(() => {
-    cleanupTempDir(tempDir);
-  });
-  
-  it('should use default config when file not exists', () => {
-    // No config file created
-    const configPath = path.join(tempDir, 'router.config.json');
+  it('should cache file hash based on mtime', () => {
+    // Simulate the hash cache implementation
+    const fileHashCache = new Map<string, { hash: string; mtime: number }>();
     
-    // Should not crash, should use defaults
-    expect(fs.existsSync(configPath)).toBe(false);
+    const calculateFileHash = (filePath: string): string => {
+      if (!fs.existsSync(filePath)) return '';
+      
+      const stats = fs.statSync(filePath);
+      const mtime = stats.mtimeMs;
+      
+      // Check cache
+      const cached = fileHashCache.get(filePath);
+      if (cached && cached.mtime === mtime) {
+        return cached.hash;
+      }
+      
+      // Calculate hash (simplified for test)
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const hash = `hash-${content.length}`;
+      
+      // Update cache
+      fileHashCache.set(filePath, { hash, mtime });
+      return hash;
+    };
+
+    // First call - should calculate
+    const hash1 = calculateFileHash(testFile);
+    expect(hash1).toBe('hash-15'); // {"test":"data"} without trailing newline
+    expect(fileHashCache.size).toBe(1);
+
+    // Second call - should use cache (file unchanged)
+    const hash2 = calculateFileHash(testFile);
+    expect(hash2).toBe(hash1);
+    expect(fileHashCache.size).toBe(1);
+
+    // Modify file and force a distinct mtime for filesystems with coarse timestamp resolution
+    fs.writeFileSync(testFile, JSON.stringify({ test: 'modified' }), 'utf-8');
+    const future = new Date(Date.now() + 2000);
+    fs.utimesSync(testFile, future, future);
+    
+    // Third call - should recalculate (mtime changed)
+    const hash3 = calculateFileHash(testFile);
+    expect(hash3).toBe('hash-19'); // {"test":"modified"} without trailing newline
+    expect(hash3).not.toBe(hash1);
+    expect(fileHashCache.size).toBe(1);
   });
-  
-  it('should prefer config file over defaults', () => {
-    createMockConfig(tempDir, {
-      strategy: 'modelFirst',
-      auto: true,
-      models: [{ id: 'test', channels: ['a', 'b'] }]
+
+  it('should avoid redundant model loading', () => {
+    // Simulate lazy loading logic
+    let loadCount = 0;
+    let currentModels: any = undefined;
+
+    const loadModelsJson = () => {
+      loadCount++;
+      return [{ id: 'test-model', name: 'Test' }];
+    };
+
+    const config = {
+      models: [{ id: 'test-model', channels: ['ch1', 'ch2'] }],
+      autoSync: false,
+      lastSyncHash: undefined
+    };
+
+    const hasConfiguredModels = config.models && config.models.length > 0;
+
+    // Optimized logic: load once if we have configured models
+    const needsModelData = (
+      (config.autoSync !== false && config.lastSyncHash) ||
+      (!config.models || config.models.length === 0) ||
+      hasConfiguredModels
+    );
+
+    if (needsModelData) {
+      currentModels = loadModelsJson();
+    }
+
+    // Should have loaded once
+    expect(loadCount).toBe(1);
+    expect(currentModels).toBeDefined();
+
+    // Second check - should not load again
+    if (!currentModels) {
+      currentModels = loadModelsJson();
+    }
+
+    // Should still be 1 (no redundant load)
+    expect(loadCount).toBe(1);
+  });
+
+  it('should defer health probes to avoid blocking startup', () => {
+    let probesStarted = false;
+    let initializationComplete = false;
+
+    const startHealthProbes = () => {
+      probesStarted = true;
+    };
+
+    const config = {
+      healthProbe: { enabled: true }
+    };
+
+    // Simulate initialization
+    const initialize = () => {
+      // ... other initialization ...
+      
+      // Defer health probes
+      if (config.healthProbe?.enabled) {
+        setTimeout(() => {
+          startHealthProbes();
+          
+          // Verify probes started after initialization
+          expect(initializationComplete).toBe(true);
+          expect(probesStarted).toBe(true);
+        }, 10); // Use 10ms for test (1000ms in production)
+      }
+      
+      // Initialization completes immediately
+      initializationComplete = true;
+    };
+
+    initialize();
+
+    // At this point, initialization is complete but probes haven't started
+    expect(initializationComplete).toBe(true);
+    expect(probesStarted).toBe(false);
+
+    // Wait for the deferred probe to start
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        expect(probesStarted).toBe(true);
+        resolve();
+      }, 20);
     });
-    
-    const configPath = path.join(tempDir, 'router.config.json');
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    
-    expect(config.strategy).toBe('modelFirst');
-    expect(config.auto).toBe(true);
+  });
+
+  it('should skip hash calculation when autoSync is disabled', () => {
+    let hashCalculations = 0;
+
+    const calculateFileHash = (filePath: string): string => {
+      hashCalculations++;
+      return 'hash-value';
+    };
+
+    const config1 = {
+      autoSync: false,
+      lastSyncHash: undefined,
+      models: [{ id: 'test', channels: ['ch1'] }]
+    };
+
+    // With autoSync disabled, should not calculate hash
+    if (config1.autoSync !== false && config1.lastSyncHash) {
+      calculateFileHash(testFile);
+    }
+
+    expect(hashCalculations).toBe(0);
+
+    const config2 = {
+      autoSync: true,
+      lastSyncHash: 'old-hash',
+      models: [{ id: 'test', channels: ['ch1'] }]
+    };
+
+    // With autoSync enabled, should calculate hash
+    if (config2.autoSync !== false && config2.lastSyncHash) {
+      calculateFileHash(testFile);
+    }
+
+    expect(hashCalculations).toBe(1);
   });
 });

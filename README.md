@@ -1,18 +1,35 @@
 # pi-router
 
-**Intelligent routing layer for pi (coding agent) with multi-level failover and observability.**
+Intelligent routing layer for pi (coding agent) with multi-level failover and observability.
 
 English | [简体中文](./README.zh-CN.md)
 
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Commands](#commands)
+- [How It Works](#how-it-works)
+- [Configuration Reference](#configuration-reference)
+- [Performance](#performance)
+- [Uninstall](#uninstall)
+- [Architecture](#architecture)
+- [Further Reading](#further-reading)
+- [License](#license)
+
 ## Features
 
-- 🔄 **Channel Failover**: Same model, different providers (lan → n1-claude → run-claude)
-- 🎯 **Model Fallback**: Cross-model failover with context transfer (opus → sonnet → gemini)
-- 🧠 **Smart Routing**: Latency-based, cost-based, capability-based channel selection
-- 🛡️ **Circuit Breaker**: Fast-fail for broken channels with automatic recovery
-- 📊 **Observability**: Decision logging, latency tracking, health monitoring
-- 💾 **Sticky Mode**: Cache preservation by preferring last successful channel
-- ⏱️ **Cooldown**: Prevent retry storms after failures
+- **Auto Router mode** — select `router/auto` and let pi-router handle all routing automatically
+- Channel failover for the same model across different providers
+- Model fallback with context transfer
+- Smart routing by latency, capability, cost, or manual order
+- Circuit breaker and cooldown protection
+- **Persistent sticky routing** — remembers the last successful channel across restarts
+- Decision logging, latency tracking, and health monitoring
+- Footer status showing the active provider channel
+- Interactive menus and tab completion for all commands
+- Interactive configuration wizard
+- Fast startup with lazy loading and caching
 
 ## Quick Start
 
@@ -33,228 +50,366 @@ See [INSTALL.md](INSTALL.md) for detailed installation options.
 
 ### 2. Configure
 
-Create `~/.pi/agent/router.config.json`:
+Recommended: run the interactive wizard.
+
+```bash
+/router config wizard
+```
+
+The wizard walks through:
+
+1. Routing strategy (`channelFirst` / `modelFirst`)
+2. Sort strategy (`latency` / `capabilityFirst` / `cost` / `manual`)
+3. Auto-sync (`enable` / `disable`)
+4. Health probe (`10 minutes` / `disabled`)
+5. Sticky mode (`enable` / `disable`)
+6. Optional channel order adjustment
+
+**Channel Classification**: The wizard automatically classifies channels into three categories:
+
+- 🔵 **OAuth** (Official) - Official API endpoints from AI providers (e.g., `api.anthropic.com`, `api.deepseek.com`)
+- 🟡 **Aggregator** (Third-party) - Third-party aggregation services
+- 🟢 **Free** (Local) - Local deployments and free services
+
+Classification is based on:
+- `auth.json` OAuth markers (`type: "oauth"`)
+- Official domain whitelist (40+ providers including Anthropic, OpenAI, Google, DeepSeek, Qwen, GLM, Kimi, and more)
+- Local URL detection (`localhost`, `127.0.0.1`)
+
+Configuration is stored at:
+
+```text
+~/.pi/agent/pi-router.json
+```
+
+Advanced users can edit the file directly. A companion file is also generated:
+
+```text
+~/.pi/agent/pi-router.README.md
+```
+
+A reference example is available at [examples/router.config.json](examples/router.config.json).
+
+### 3. Use
+
+In pi, select the Auto Router model:
+
+```text
+/model router/auto
+```
+
+This routes all requests through pi-router automatically, using your configured strategy and model chain.
+
+You can also select a specific model with routing:
+
+```text
+/model router/your-model-id
+```
+
+pi-router will then:
+
+- try channels in order (based on strategy)
+- fail over on errors
+- apply circuit breaker and cooldown rules
+- optionally fall back to another model
+- record health and latency information
+- display the active channel in the footer (e.g., `via anthropic`)
+- remember the last successful route for next time (sticky mode)
+
+## Commands
+
+Run `/router` without arguments to open an interactive menu, or use tab completion.
+
+### Configuration
+
+```text
+/router config wizard    # Interactive configuration wizard
+/router config show      # Show current configuration
+/router config reset     # Reset to default configuration
+```
+
+Shortcuts:
+
+```text
+/router config w         # = wizard
+/router config s         # = show
+/router config r         # = reset
+```
+
+### Monitoring
+
+```text
+/router status           # Show config summary
+/router list             # List configured router models
+/router explain          # Show failures, latency, health, circuits
+/router decisions        # Show recent routing decisions
+/router probes           # Show background health probe results
+/router pricing          # Show per-channel pricing breakdown
+```
+
+### Sticky Routing
+
+```text
+/router sticky           # Show current sticky routing records
+/router sticky clear     # Clear all sticky records (re-route from beginning)
+/router sticky clear <m> # Clear sticky record for a specific model
+```
+
+### Management
+
+```text
+/router sync             # Check models.json changes
+/router sync accept      # Apply detected changes
+/router diff             # Preview config differences
+```
+
+## How It Works
+
+### Auto Router (`router/auto`)
+
+When you select `router/auto`, pi-router manages the full model chain:
+
+```text
+User Request: router/auto
+    ↓
+Check sticky record → found "model-X@channel-Y"?
+    ↓ yes                    ↓ no
+Try sticky first         Follow strategy order
+    ↓ fail                   ↓
+Clear sticky, fall back to strategy order
+    ↓
+channelFirst: Model-A[ch1,ch2,ch3] → Model-B[ch1,ch2] → ...
+modelFirst:   [Model-A@ch1, Model-B@ch1] → [Model-A@ch2, Model-B@ch2] → ...
+    ↓
+On success: update sticky record, stream response
+    ↓
+Footer shows: via <channel-name>
+```
+
+### Same model, different providers
+
+Example:
+
+```text
+Try channels: Provider-A -> Provider-B -> Provider-C
+```
+
+Typical flow:
+
+```text
+User Request: router/example-model
+    ↓
+Router intercepts
+    ↓
+Try Provider-A -> Provider-B -> Provider-C
+- check cooldown
+- check circuit breaker
+- forward to real provider
+- on error: record failure, try next
+    ↓
+If all channels fail, try fallback model
+    ↓
+Stream events back to user
+```
+
+### Sticky Mode
+
+Sticky mode remembers the last successful route and tries it first on next request:
+
+```text
+Request 1: Provider-A succeeds → sticky = Provider-A
+Request 2: Provider-A tried first → succeeds
+Request 3: Provider-A fails → clear sticky, try Provider-B → succeeds → sticky = Provider-B
+Request 4: Provider-B tried first
+...
+(Persists across pi restarts)
+```
+
+Use `/router sticky clear` to reset and re-route from the beginning.
+
+### Circuit Breaker
+
+```text
+Failures: 0 -> 1 -> 2 -> 3 -> 4 -> 5 (open)
+    ↓
+Block requests for a cooldown window
+    ↓
+Half-open: allow a test request
+    ↓
+Success -> closed
+Failure -> open again
+```
+
+### Context Transfer
+
+When switching models:
+
+1. `summary` mode: summarize the conversation
+2. sanitize incompatible context fields if needed
+3. forward the adapted context to the fallback model
+
+## Configuration Reference
+
+### Main File
+
+```text
+~/.pi/agent/pi-router.json
+```
+
+### Typical Configuration
 
 ```json
 {
   "strategy": "channelFirst",
+  "sortBy": "latency",
+  "autoSync": true,
+  "sticky": true,
+  "healthProbe": {
+    "enabled": false
+  },
   "models": [
     {
-      "id": "claude-opus-4-8",
-      "channels": ["anthropic", "openrouter"]
+      "id": "example-model",
+      "channels": ["Provider-A", "Provider-B", "Provider-C"]
     }
   ]
 }
 ```
 
-See [examples/router.config.json](examples/router.config.json) for full configuration.
-
-### 3. Use
-
-In pi, select a router model:
-
-```
-/model
-# Select: router/claude-opus-4-8
-```
-
-Pi-router will automatically:
-- Try channels in order (with smart sorting)
-- Failover on errors
-- Apply circuit breaker and cooldowns
-- Fall back to alternative models if needed
-- Track performance and health
-
-## Commands
-
-```
-/router status       # Show current config
-/router list         # List available models
-/router explain      # Show failures, latency, health, circuits
-/router decisions    # Show recent routing decisions
-/router probes       # Show background health probe results
-/router pricing      # Show per-channel pricing breakdown
-/router sync         # Check for model changes
-/router sync accept  # Apply detected changes
-```
-
-## How It Works
-
-```
-User Request: router/claude-opus-4-8
-    ↓
-Router Intercepts
-    ↓
-Try channels: lan → n1-claude → run-claude
-├─ Check cooldown
-├─ Check circuit breaker
-├─ Forward to real provider
-└─ On error: record, try next
-    ↓
-All L1 failed? Try model fallback
-├─ Generate context summary
-├─ Sanitize for compatibility
-└─ Forward to claude-sonnet-4-6@lan
-    ↓
-Stream events to user
-├─ Record latency on first event
-├─ Update health status
-└─ Log routing decision
-```
-
-## Key Concepts
-
-### Sticky Mode
-
-Prefer last successful channel to maximize cache hits:
-
-```
-Request 1: lan (success) → sticky = lan
-Request 2: Try lan first (cache hit!)
-Request 3: lan fails → try n1-claude → sticky = n1-claude
-Request 4: Try n1-claude first (cache preserved)
-```
-
-### Circuit Breaker
-
-Fast-fail for broken channels:
-
-```
-Failures: 0 → 1 → 2 → 3 → 4 → 5 (OPEN)
-    ↓
-Block requests for 2 minutes
-    ↓
-Half-open: Allow 1 test request
-    ↓
-Success? → CLOSED (reset)
-Failure? → OPEN (another 2 minutes)
-```
-
-### Context Transfer
-
-When switching models (model fallback):
-
-1. **Summary mode**: AI summarizes conversation (~500 tokens)
-2. **Sanitize**: Handle system message / role incompatibilities
-3. **Forward**: Use modified context with fallback model
-
-## Observability
-
-### /router explain
-
-```
-Active Channels:
-  claude-opus-4-8 → lan
-
-Active Cooldowns:
-  claude-opus-4-8@n1-claude: 45s remaining
-
-Recent Failures:
-  claude-opus-4-8@n1-claude (52s ago): Connection timeout
-
-Channel Latency (avg last 10):
-  claude-opus-4-8@lan: 523ms (10 samples)
-  claude-opus-4-8@n1-claude: 1247ms (8 samples)
-
-Channel Health:
-  claude-opus-4-8@lan: ✓ healthy (checked 5s ago)
-  claude-opus-4-8@n1-claude: ✗ unhealthy (3 failures)
-
-Circuit Breakers:
-  🔴 opus@n1-claude: open (5 failures, retry in 87s)
-```
-
-### /router decisions
-
-```
-Recent Routing Decisions (last 20):
-
-claude-opus-4-8 -> lan (523ms) (12s ago)
-  Strategy: sticky | first choice
-
-claude-opus-4-8 -> run-claude (1847ms) (45s ago)
-  Strategy: sticky | failover after 2 failures
-  Tried: lan -> n1-claude -> run-claude
-```
-
-## Configuration Reference
-
 ### Global Options
 
 ```json
 {
-  "strategy": "channelFirst",     // Routing strategy
-  "auto": true,                   // Auto-sync models.json changes
-  "sticky": true,                 // Prefer last successful channel
-  "contextTransfer": "summary",   // "none" | "full" | "summary"
-  "sortBy": "latency",            // "config" | "latency" | "cost"
-  "summaryPrompt": "...",         // Custom summary prompt
+  "strategy": "channelFirst",
+  "sortBy": "latency",
+  "autoSync": true,
+  "sticky": true,
+  "contextTransfer": "summary",
+  "summaryModel": "optional-summary-model",
+  "summaryPrompt": "optional custom prompt",
+  "summaryMaxTokens": 2000,
   "failover": {
-    "cooldownMs": 60000           // Cooldown duration (default 60s)
+    "cooldownMs": 60000
   },
   "healthProbe": {
-    "enabled": true,              // Enable background health probes
-    "intervalMs": 300000,         // Probe interval (default 5 min)
-    "timeoutMs": 10000,           // Probe timeout (default 10s)
-    "probeMessage": "ping"         // Simple test message
+    "enabled": true,
+    "intervalMs": 600000,
+    "timeoutMs": 10000,
+    "probeMessage": "ping"
   }
 }
 ```
+
+### Summary AI Behavior
+
+Default behavior:
+
+- `summaryModel` is not required
+- if the current context still fits inside the selected target model's context window, pi-router skips summary generation and forwards the full context
+- when a summary is needed and `summaryModel` is unset, pi-router first uses the target model for summary generation
+- if AI summary generation fails, pi-router falls back to a plain text non-AI summary path
+- `summaryMaxTokens` defaults to `2000`
+
+Optional dedicated summary AI configuration:
+
+```json
+{
+  "contextTransfer": "summary",
+  "summaryModel": "cheap-summary-model",
+  "summaryPrompt": "Summarize the conversation for model handoff.",
+  "summaryMaxTokens": 2000
+}
+```
+
+`summaryModel` supports either:
+
+- `model-id`
+- `model-id@provider`
 
 ### Per-Model Options
 
 ```json
 {
-  "id": "claude-opus-4-8",
-  "channels": ["lan", "n1-claude", "run-claude"],
-  "sticky": true,                 // Override global sticky
-  "sortBy": "latency",            // Override global sortBy
-  "contextTransfer": "summary",   // Override global contextTransfer
+  "id": "example-model",
+  "channels": ["Provider-A", "Provider-B"],
+  "sticky": true,
+  "sortBy": "latency",
+  "contextTransfer": "summary",
   "fallbackModels": [
     {
-      "id": "claude-sonnet-4-6",
-      "channels": ["lan", "run-claude"]
+      "id": "fallback-model",
+      "channels": ["Provider-A", "Provider-B"]
     }
   ],
   "failover": {
-    "cooldownMs": 30000           // Override global cooldown
+    "cooldownMs": 30000
   }
 }
+```
+
+### Manual Editing
+
+You can edit `~/.pi/agent/pi-router.json` directly.
+
+After editing:
+
+```text
+/reload
+```
+
+or restart pi.
+
+## Performance
+
+pi-router is optimized for fast startup with minimal overhead.
+
+### Startup Optimization
+
+- smart file hash caching
+- lazy loading of `models.json`
+- deferred health probe startup
+- reduced duplicate file I/O
+
+### Typical Improvement
+
+| Scenario | Before | After | Improvement |
+|----------|--------|-------|-------------|
+| Hot cache | ~50-80ms | ~5-15ms | ~80% |
+| Cold cache | ~50-80ms | ~30-50ms | ~40% |
+| autoSync disabled | ~30-50ms | ~5-10ms | ~80% |
+| healthProbe disabled | ~40-60ms | ~5-15ms | ~75% |
+
+See [PERFORMANCE_OPTIMIZATION.md](PERFORMANCE_OPTIMIZATION.md) for details.
+
+## Uninstall
+
+```bash
+# npm install
+pi remove npm:pi-router
+
+# git install
+pi remove git:github.com/jiangjilin/pi-router
+
+# local install
+pi remove /path/to/pi-router
+```
+
+Configuration files are not removed automatically.
+
+```bash
+rm -f ~/.pi/agent/pi-router.json ~/.pi/agent/pi-router.README.md
 ```
 
 ## Architecture
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed design documentation.
 
-## Development Status
+## Further Reading
 
-**v0.3.0-alpha** - Cost optimization:
-- ✅ Per-channel pricing with multipliers
-- ✅ Cost-based channel sorting
-- ✅ Free self-hosted channel detection
-- ✅ /router pricing command
-
-**v0.2.0-alpha** - Enhanced features:
-- ✅ Real AI summary generation
-- ✅ Background health probes
-- ✅ Proactive circuit breaker recovery
-- ✅ Enhanced observability
-
-**v0.1.0-alpha** - Core features complete:
-- ✅ channel failover
-- ✅ model fallback
-- ✅ Circuit breaker
-- ✅ Latency tracking
-- ✅ Health monitoring
-- ✅ Decision logging
-- ✅ Full command set
-
-**v0.2.0** - Planned:
-- Background health probes
-- Per-channel pricing
-- Real AI summary generation
-- Decision analytics
-- Unit tests
+- [INSTALL.md](./INSTALL.md)
+- [TESTING.md](./TESTING.md)
+- [ARCHITECTURE.md](./ARCHITECTURE.md)
+- [CHANGELOG.md](./CHANGELOG.md)
 
 ## License
 
@@ -262,4 +417,4 @@ MIT
 
 ## Credits
 
-Built with [pi coding agent](https://github.com/pi-agi/pi-coding-agent) extension API.
+Built with the [pi coding agent](https://github.com/pi-agi/pi-coding-agent) extension API.

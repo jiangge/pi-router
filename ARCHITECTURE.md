@@ -3,7 +3,7 @@
 ## Overview
 
 Pi-Router is a **production-grade intelligent routing layer** for pi (coding agent) that provides:
-- **Channel Failover (channelFirst)**: Same model, different providers (lan, n1-claude, run-claude, etc.)
+- **Channel Failover (channelFirst)**: Same model, different providers (Provider-A, Provider-B, Provider-C, etc.)
 - **Model Fallback**: Different models with context transfer (opus → sonnet → gemini)
 - **Smart Routing**: Latency-based, cost-based, capability-based channel selection
 - **Reliability**: Circuit breaker, health monitoring, cooldown mechanisms
@@ -22,21 +22,21 @@ User selects: router/claude-opus-4-8
   ↓
 Router intercepts via custom streamSimple handler
   ↓
-Try channels: lan → n1-claude → run-claude
+Try channels: Provider-A → Provider-B → Provider-C
   ↓
-Forward to real provider: claude-opus-4-8@lan
+Forward to real provider: claude-opus-4-8@Provider-A
 ```
 
 ### 2. Multi-Level Failover
 
 ```
 Channel Failover (channelFirst) (same model)
-├─ claude-opus-4-8@lan (primary)
-├─ claude-opus-4-8@n1-claude (failover 1)
-└─ claude-opus-4-8@run-claude (failover 2)
+├─ claude-opus-4-8@Provider-A (primary)
+├─ claude-opus-4-8@Provider-B (failover 1)
+└─ claude-opus-4-8@Provider-C (failover 2)
     ↓ All all channels failed
 Model Fallback (different models)
-├─ claude-sonnet-4-6@lan (fallback model 1)
+├─ claude-sonnet-4-6@Provider-A (fallback model 1)
 └─ gemini-2.0-flash-exp@google (fallback model 2)
 ```
 
@@ -52,16 +52,17 @@ Located at `~/.pi/agent/pi-router.json`:
   "contextTransfer": "summary",
   "sortBy": "config",
   "summaryPrompt": "Summarize conversation...",
+  "summaryMaxTokens": 2000,
   "models": [
     {
       "id": "claude-opus-4-8",
-      "channels": ["lan", "n1-claude", "run-claude"],
+      "channels": ["Provider-A", "Provider-B", "Provider-C"],
       "sticky": true,
       "sortBy": "latency",
       "fallbackModels": [
         {
           "id": "claude-sonnet-4-6",
-          "channels": ["lan", "run-claude"]
+          "channels": ["Provider-A", "Provider-C"]
         }
       ]
     }
@@ -217,7 +218,7 @@ When switching models, handle incompatibilities:
 
 1. **`none`**: Pass context as-is (risky, may fail on compat issues)
 2. **`full`**: Sanitize but keep full conversation
-3. **`summary`**: Generate AI summary (~500 tokens), sanitize
+3. **`summary`**: Only summarize when needed; otherwise pass full context. When summarizing, target size defaults to ~2000 tokens.
 
 ### Process
 
@@ -227,8 +228,9 @@ const summaryResult = await generateContextSummary(
   messages,
   primaryModel,
   targetModel,
-  summaryModel, // Use cheap model
-  summaryPrompt
+  summaryModel,      // Optional dedicated summary model
+  summaryPrompt,
+  summaryMaxTokens
 );
 
 // 2. Sanitize context for compatibility
@@ -447,7 +449,7 @@ Preview differences between config and `models.json`
 
 ### Manual Testing
 1. Configure router with multiple channels
-2. Kill one provider (e.g., stop lan endpoint)
+2. Kill one provider (e.g., stop Provider-A endpoint)
 3. Observe automatic failover in logs
 4. Check `/router explain` for failure tracking
 5. Verify circuit breaker opens after threshold
@@ -470,7 +472,7 @@ Preview differences between config and `models.json`
 - Sticky mode overrides sorting (by design)
 
 ### Context transfer fails
-- Check summary generation logs
+- Check summary generation logs (enable with `PI_ROUTER_DEBUG=1`)
 - Verify fallback model has compatible API
 - Try `contextTransfer: "full"` as fallback
 - Review `sanitizeContextForSwitch()` logic

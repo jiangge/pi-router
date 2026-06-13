@@ -7,6 +7,10 @@
   "type": "module",
   "files": [
     "dist",
+    "index.ts",
+    "config-wizard.ts",
+    "config-wizard-ui.ts",
+    "config-wizard-flow.ts",
     "examples",
     "README.md",
     "README.zh-CN.md",
@@ -32,7 +36,7 @@
   ],
   "pi": {
     "extensions": [
-      "./dist/index.js"
+      "./index.ts"
     ]
   },
   "author": "Jiang Jilin",
@@ -67,6 +71,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.79.1"
+    "@earendil-works/pi-ai": "^0.79.1",
+    "@earendil-works/pi-tui": "^0.79.2"
   }
 }
