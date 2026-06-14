@@ -38,6 +38,78 @@ type RouterConfig = {
   lastSyncHash?: string;
 };
 
+type EditableWizardModel = {
+  id: string;
+  channels: ChannelScore[];
+};
+
+function toEditableChannelScore(
+  channel: string,
+  classifications: Map<string, { category: "oauth" | "free" | "aggregator"; reason: string }>
+): ChannelScore {
+  const classification = classifications.get(channel);
+  return {
+    channel,
+    score: 50,
+    reason: classification?.reason || "已配置通道",
+    category: classification?.category || "aggregator",
+  };
+}
+
+export function hasExistingRouterModelConfig(config: RouterConfig): boolean {
+  return Array.isArray(config.models) && config.models.length > 0;
+}
+
+export function buildEditableModelsFromConfig(
+  config: RouterConfig,
+  currentModels: Array<{ id: string; provider: string; baseUrl?: string }>
+): EditableWizardModel[] {
+  const classifications = scanAndClassifyChannels(currentModels);
+  const discoveredChannelsByModel = new Map<string, string[]>();
+
+  for (const model of currentModels) {
+    const channels = discoveredChannelsByModel.get(model.id) || [];
+    if (!channels.includes(model.provider)) {
+      channels.push(model.provider);
+      discoveredChannelsByModel.set(model.id, channels);
+    }
+  }
+
+  return (config.models || [])
+    .map((configModel) => {
+      const discoveredChannels = discoveredChannelsByModel.get(configModel.id) || [];
+
+      // FIX #5, #11: Use Set for O(1) lookup instead of O(n) .includes()
+      const discoveredSet = new Set(discoveredChannels);
+      const configuredChannels = configModel.channels.filter((channel) => discoveredSet.has(channel));
+
+      // FIX #5: Keep configured models even if no channels are currently discovered
+      // This preserves user's configuration when providers are temporarily unavailable
+      const configuredSet = new Set(configuredChannels);
+      const newlyDiscoveredChannels = discoveredChannels.filter((channel) => !configuredSet.has(channel));
+
+      const mergedChannels = [...configuredChannels, ...newlyDiscoveredChannels];
+
+      // Map to editable channel scores
+      const editableChannels = mergedChannels.map((channel) => toEditableChannelScore(channel, classifications));
+
+      return {
+        id: configModel.id,
+        channels: editableChannels,
+      };
+    })
+    // FIX #5: Don't filter out models with no channels - preserve configuration
+    // Only filter out models that were never configured
+    .filter((model) => {
+      // Keep if model has channels OR if it was explicitly configured
+      const wasConfigured = config.models?.some(cm => cm.id === model.id) || false;
+      if (wasConfigured && model.channels.length === 0) {
+        console.warn(`[pi-router] Configured model '${model.id}' has no currently available channels, but preserving in configuration.`);
+      }
+      return model.channels.length > 0 || wasConfigured;
+    });
+}
+
 /**
  * Run the configuration wizard
  */
@@ -150,6 +222,62 @@ export async function runConfigWizard(
     console.error("[pi-router] Wizard error:", err);
     ctx.ui.notify(`Configuration wizard error: ${err}`, "error");
   }
+}
+
+export async function runConfigOrderWizard(
+  ctx: any,
+  config: RouterConfig,
+  loadModelsJson: () => Array<{ id: string; provider: string; baseUrl?: string }>,
+  saveConfig: (config: RouterConfig) => void,
+): Promise<void> {
+  if (!hasExistingRouterModelConfig(config)) {
+    ctx.ui.notify(
+      "未发现现有 router 模型顺序配置\n\n" +
+      "请先运行 /router config wizard 完成初始配置，之后再使用 /router config order 调整模型/渠道顺序。",
+      "warning"
+    );
+    return;
+  }
+
+  const currentModels = loadModelsJson();
+  const editableModels = buildEditableModelsFromConfig(config, currentModels);
+  if (editableModels.length === 0) {
+    ctx.ui.notify(
+      "没有可调整的模型顺序\n\n" +
+      "当前配置里的模型没有在 models.json 中找到可用渠道。\n" +
+      "请先检查 models.json，或重新运行 /router config wizard。",
+      "warning"
+    );
+    return;
+  }
+
+  const strategy = config.strategy || "channelFirst";
+  const sortBy = config.sortBy || "manual";
+  const orderResult = await runStep6AdjustOrder(
+    ctx,
+    editableModels,
+    sortBy,
+    strategy,
+    config.customOrder,
+  );
+  if (!orderResult) return;
+
+  const nextConfig: RouterConfig = {
+    ...config,
+    models: editableModels.map((model) => ({
+      id: model.id,
+      channels: model.channels.map((channel) => channel.channel),
+    })),
+  };
+
+  if (strategy === "custom") {
+    nextConfig.customOrder = orderResult as string[];
+  } else {
+    nextConfig.models = orderResult as Array<{ id: string; channels: string[] }>;
+  }
+
+  saveConfig(nextConfig);
+  showOrderAdjustmentMessage(ctx, nextConfig);
 }
 
 /**
@@ -368,7 +496,8 @@ async function runStep6AdjustOrder(
   ctx: any,
   models: Array<{ id: string; channels: ChannelScore[] }>,
   sortBy: string,
-  strategy: "channelFirst" | "custom"
+  strategy: "channelFirst" | "custom",
+  initialCustomOrder?: string[]
 ): Promise<Array<{ id: string; channels: string[] }> | string[] | null> {
 
   if (strategy === "channelFirst") {
@@ -401,7 +530,7 @@ async function runStep6AdjustOrder(
     // custom: Flat editor (all model@channel pairs in one list)
     return await ctx.ui.custom(
       (tui: any, theme: any, _kb: any, done: any) => {
-        const editor = new FlatOrderEditor(models, theme);
+        const editor = new FlatOrderEditor(models, theme, initialCustomOrder);
 
         editor.onSkip = () => {
           // Skip adjustment, use initial order (modelFirst logic)
@@ -439,8 +568,24 @@ function showCompletionMessage(ctx: any, config: RouterConfig): void {
     `Found ${config.models?.length || 0} multi-channel models\n` +
     "Configuration saved\n\n" +
     "Expected startup time: ~15-30ms\n\n" +
+    "Run /router config order to adjust model/channel order later\n" +
     "Run /router config show to view details\n" +
     "Run /reload to apply configuration";
+
+  ctx.ui.notify(message, "info");
+}
+
+function showOrderAdjustmentMessage(ctx: any, config: RouterConfig): void {
+  const message =
+    "╔═══════════════════════════════════════════════════════════╗\n" +
+    "║           Order Updated                                   ║\n" +
+    "╚═══════════════════════════════════════════════════════════╝\n\n" +
+    `策略保持不变: ${config.strategy}\n` +
+    `排序策略保持不变: ${config.sortBy}\n` +
+    `已更新模型数: ${config.models?.length || 0}\n\n` +
+    "本次仅调整模型/渠道顺序，不会重跑完整配置向导。\n\n" +
+    "运行 /router config show 查看最新顺序\n" +
+    "运行 /reload 应用配置更改";
 
   ctx.ui.notify(message, "info");
 }

@@ -8,7 +8,11 @@ import {
   createFailoverStream,
   createMirrorModels,
   detectModelChanges,
+  expandProviderModels,
   estimateContextTokens,
+  filterConfigurableModels,
+  modelsFromRegistry,
+  buildModelMap,
   estimateRequestCost,
   applyRouterRequestOptions,
   formatFooterStatus,
@@ -297,6 +301,62 @@ describe('provider registration helpers', () => {
 
     expect(mirrors.map((m: any) => m.id)).toEqual(['auto', 'm1']);
     expect(mirrors.every((m: any) => m.api === 'pi-router')).toBe(true);
+  });
+
+  it('expands modelOverrides-based providers such as openai-codex', () => {
+    const models = expandProviderModels('openai-codex', {
+      modelOverrides: {
+        'gpt-5.5': {
+          name: 'GPT-5.5 (high)',
+        },
+      },
+    });
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({
+      id: 'gpt-5.5',
+      provider: 'openai-codex',
+      api: 'openai-codex-responses',
+      name: 'GPT-5.5 (high)',
+    });
+    expect(models[0].baseUrl).toBeTruthy();
+  });
+
+  it('prefers modelRegistry.getAvailable so unauthed oauth providers are excluded', () => {
+    const models = modelsFromRegistry({
+      getAvailable: () => [
+        { id: 'gpt-5.5', name: 'Codex GPT', provider: 'openai-codex', api: 'openai-codex-responses', baseUrl: 'https://chatgpt.com/backend-api', reasoning: true, input: ['text'], contextWindow: 1, maxTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      ],
+      getAll: () => [
+        { id: 'gpt-5.5', name: 'OpenAI GPT', provider: 'openai', api: 'openai-responses', baseUrl: 'https://api.openai.com/v1', reasoning: true, input: ['text'], contextWindow: 1, maxTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+      ],
+    } as any);
+
+    expect(models?.map(model => model.provider)).toEqual(['openai-codex']);
+  });
+
+  it('filters config candidates to configured providers and excludes router pseudo models', () => {
+    const models = filterConfigurableModels([
+      { id: 'gpt-5.5', name: 'Codex GPT', provider: 'openai-codex', api: 'openai-codex-responses' },
+      { id: 'gpt-5.5', name: 'OpenAI GPT', provider: 'openai', api: 'openai-responses' },
+      { id: 'gpt-5.5', name: 'Router GPT', provider: 'router', api: 'pi-router' },
+      { id: 'claude-opus-4-7', name: 'Anthropic', provider: 'anthropic', api: 'anthropic-messages' },
+    ] as any, new Set(['openai-codex', 'anthropic']));
+
+    expect(models.map(model => `${model.id}@${model.provider}`)).toEqual([
+      'gpt-5.5@openai-codex',
+      'claude-opus-4-7@anthropic',
+    ]);
+  });
+
+  it('buildModelMap excludes router pseudo models to avoid recursive routing', () => {
+    const map = buildModelMap([
+      { id: 'gpt-5.5', name: 'Codex GPT', provider: 'openai-codex', api: 'openai-codex-responses' },
+      { id: 'gpt-5.5', name: 'Router GPT', provider: 'router', api: 'pi-router' },
+    ] as any);
+
+    expect(Array.from(map.keys())).toEqual(['gpt-5.5@openai-codex']);
+    expect(map.has('gpt-5.5@router')).toBe(false);
   });
 });
 

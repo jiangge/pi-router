@@ -8,13 +8,13 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, SelectList, Text, truncateToWidth, visibleWidth, type SelectItem } from "@earendil-works/pi-tui";
-import { streamSimple, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { getModels as getBuiltinPiAiModels, streamSimple, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { Model, Api, Context, SimpleStreamOptions, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
-import { runConfigWizard } from "./config-wizard-flow.js";
+import { runConfigOrderWizard, runConfigWizard } from "./config-wizard-flow.js";
 
 const PI_ROUTER_DEBUG = process.env.PI_ROUTER_DEBUG === "1";
 const ROUTER_API = "pi-router" as Api;
@@ -299,11 +299,282 @@ function getModelsJsonPath(): string {
   return path.join(getPiConfigDir(), "models.json");
 }
 
+// Cache for provider IDs to avoid repeated file system access
+let providerIdsCache: { authProviders: string[]; modelsProviders: string[]; mtimeMs: { auth: number | null; models: number | null } } | null = null;
+
+/**
+ * Load provider IDs from both auth.json and models.json with caching
+ * FIX #9, #13: Consolidate synchronous file reads and cache results
+ */
+function loadProviderIds(): { authProviders: string[]; modelsProviders: string[] } {
+  const authPath = path.join(getPiConfigDir(), "auth.json");
+  const modelsPath = getModelsJsonPath();
+
+  const authMtime = getFileMtimeMs(authPath);
+  const modelsMtime = getFileMtimeMs(modelsPath);
+
+  // Return cached if mtimes haven't changed
+  if (providerIdsCache &&
+      providerIdsCache.mtimeMs.auth === authMtime &&
+      providerIdsCache.mtimeMs.models === modelsMtime) {
+    return {
+      authProviders: providerIdsCache.authProviders,
+      modelsProviders: providerIdsCache.modelsProviders
+    };
+  }
+
+  let authProviders: string[] = [];
+  let modelsProviders: string[] = [];
+
+  // Load auth.json
+  if (fs.existsSync(authPath)) {
+    try {
+      const auth = JSON.parse(fs.readFileSync(authPath, "utf-8")) as Record<string, unknown>;
+      authProviders = Object.keys(auth);
+    } catch {
+      authProviders = [];
+    }
+  }
+
+  // Load models.json
+  if (fs.existsSync(modelsPath)) {
+    try {
+      const modelsJson = JSON.parse(fs.readFileSync(modelsPath, "utf-8")) as { providers?: Record<string, unknown> };
+      modelsProviders = Object.keys(modelsJson.providers || {});
+    } catch {
+      modelsProviders = [];
+    }
+  }
+
+  // Update cache
+  providerIdsCache = {
+    authProviders,
+    modelsProviders,
+    mtimeMs: { auth: authMtime, models: modelsMtime }
+  };
+
+  return { authProviders, modelsProviders };
+}
+
 function normalizeModelForProvider(model: PiModel): PiModel {
   return {
     ...model,
     maxTokens: Math.min(model.maxTokens || DEFAULT_ROUTER_MAX_TOKENS, DEFAULT_ROUTER_MAX_TOKENS),
   };
+}
+
+/**
+ * Merge headers and compat from multiple sources with correct precedence
+ * FIX #11: Extract duplicated merge logic into shared helper
+ * Precedence: override > provider > builtin (later spread wins)
+ */
+function mergeModelProps(
+  builtin: { headers?: Record<string, string>; compat?: Record<string, unknown> },
+  provider: { headers?: Record<string, string>; compat?: Record<string, unknown> },
+  override: { headers?: Record<string, string>; compat?: Record<string, unknown> } = {}
+): { headers?: Record<string, string>; compat?: Record<string, unknown> } {
+  const headers = builtin.headers || provider.headers || override.headers
+    ? { ...(builtin.headers || {}), ...(provider.headers || {}), ...(override.headers || {}) }
+    : undefined;
+  const compat = builtin.compat || provider.compat || override.compat
+    ? { ...(builtin.compat || {}), ...(provider.compat || {}), ...(override.compat || {}) }
+    : undefined;
+  return { headers, compat };
+}
+
+/**
+ * Expand provider models from models.json or modelOverrides with builtin fallback
+ * FIX #7: Better error handling for getBuiltinPiAiModels cast
+ * FIX #8: Warn user when modelOverrides entry has no builtin model
+ * FIX #13: Respect explicit models:[] to disable provider (no builtin fallback)
+ */
+function expandProviderModels(providerName: string, provider: any): PiModel[] {
+  const expanded: PiModel[] = [];
+  let builtinModels: PiModel[] = [];
+
+  // Try to get builtin models with safer error handling
+  try {
+    const getBuiltin = getBuiltinPiAiModels as any;
+    if (typeof getBuiltin === 'function') {
+      const result = getBuiltin(providerName);
+      builtinModels = Array.isArray(result) ? result : [];
+    }
+  } catch (err) {
+    debugLog(`[pi-router] Failed to get builtin models for ${providerName}:`, err);
+    builtinModels = [];
+  }
+
+  // Process explicit models array
+  if (Array.isArray(provider.models)) {
+    // FIX #13: If models array is explicitly set (even if empty), don't use builtin fallback
+    // This allows users to disable a provider by setting models:[]
+    for (const model of provider.models) {
+      const merged = mergeModelProps({ headers: model.headers, compat: model.compat }, { headers: provider.headers, compat: provider.compat });
+
+      expanded.push(normalizeModelForProvider({
+        ...model,
+        provider: providerName,
+        api: model.api || provider.api || "unknown",
+        baseUrl: model.baseUrl || provider.baseUrl,
+        headers: merged.headers,
+        compat: merged.compat,
+      }));
+    }
+
+    // Early return - don't fall through to builtin fallback when models array is explicit
+    if (provider.models.length === 0) {
+      debugLog(`[pi-router] Provider ${providerName} has explicit empty models array, skipping builtin fallback`);
+    }
+
+    // Process modelOverrides for explicit models array
+    if (provider.modelOverrides && typeof provider.modelOverrides === "object") {
+      for (const [modelId, overrideData] of Object.entries(provider.modelOverrides)) {
+        if (expanded.some(model => model.id === modelId)) {
+          continue;
+        }
+
+        const builtinModel = builtinModels.find(model => model.id === modelId);
+        if (!builtinModel) {
+          // FIX #6: Surface error to user, not just debug log
+          console.warn(`[pi-router] Warning: modelOverrides entry '${providerName}.${modelId}' has no builtin model to extend. Check that the model ID is correct.`);
+          debugLog(`[pi-router] Available builtin models for ${providerName}:`, builtinModels.map(m => m.id));
+          continue;
+        }
+
+        const override = overrideData as Partial<PiModel>;
+        const merged = mergeModelProps(
+          { headers: builtinModel.headers, compat: builtinModel.compat },
+          { headers: provider.headers, compat: provider.compat },
+          { headers: override.headers, compat: override.compat }
+        );
+
+        expanded.push(normalizeModelForProvider({
+          ...builtinModel,
+          ...override,
+          id: modelId,
+          provider: providerName,
+          api: override.api || provider.api || builtinModel.api || "unknown",
+          baseUrl: override.baseUrl || provider.baseUrl || builtinModel.baseUrl,
+          headers: merged.headers,
+          compat: merged.compat,
+        }));
+      }
+    }
+
+    return expanded;
+  }
+
+  // Process modelOverrides-only providers (like openai-codex)
+  if (provider.modelOverrides && typeof provider.modelOverrides === "object") {
+    for (const [modelId, overrideData] of Object.entries(provider.modelOverrides)) {
+      const builtinModel = builtinModels.find(model => model.id === modelId);
+      if (!builtinModel) {
+        // FIX #6: Surface error to user, not just debug log
+        console.warn(`[pi-router] Warning: modelOverrides entry '${providerName}.${modelId}' has no builtin model to extend. Check that the model ID is correct.`);
+        debugLog(`[pi-router] Available builtin models for ${providerName}:`, builtinModels.map(m => m.id));
+        continue;
+      }
+
+      const override = overrideData as Partial<PiModel>;
+      const merged = mergeModelProps(
+        { headers: builtinModel.headers, compat: builtinModel.compat },
+        { headers: provider.headers, compat: provider.compat },
+        { headers: override.headers, compat: override.compat }
+      );
+
+      expanded.push(normalizeModelForProvider({
+        ...builtinModel,
+        ...override,
+        id: modelId,
+        provider: providerName,
+        api: override.api || provider.api || builtinModel.api || "unknown",
+        baseUrl: override.baseUrl || provider.baseUrl || builtinModel.baseUrl,
+        headers: merged.headers,
+        compat: merged.compat,
+      }));
+    }
+  }
+
+  // Only use builtin fallback if no explicit models array was provided
+  if (expanded.length === 0 && builtinModels.length > 0 && !Array.isArray(provider.models)) {
+    for (const builtinModel of builtinModels) {
+      const merged = mergeModelProps({ headers: builtinModel.headers, compat: builtinModel.compat }, { headers: provider.headers, compat: provider.compat });
+
+      expanded.push(normalizeModelForProvider({
+        ...builtinModel,
+        provider: providerName,
+        api: provider.api || builtinModel.api || "unknown",
+        baseUrl: provider.baseUrl || builtinModel.baseUrl,
+        headers: merged.headers,
+        compat: merged.compat,
+      }));
+    }
+  }
+
+  return expanded;
+}
+
+function modelsFromRegistry(modelRegistry: any): PiModel[] | undefined {
+  const getter = typeof modelRegistry?.getAvailable === "function"
+    ? () => modelRegistry.getAvailable()
+    : typeof modelRegistry?.getAll === "function"
+      ? () => modelRegistry.getAll()
+      : undefined;
+
+  if (!getter) {
+    return undefined;
+  }
+
+  try {
+    const models = getter() as Array<any>;
+    return models.map((model) => normalizeModelForProvider({
+      id: model.id,
+      name: model.name,
+      provider: model.provider,
+      api: model.api,
+      baseUrl: model.baseUrl,
+      headers: model.headers,
+      compat: model.compat,
+      reasoning: model.reasoning,
+      thinkingLevelMap: model.thinkingLevelMap,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      cost: model.cost,
+      input: model.input,
+    }));
+  } catch (err) {
+    debugLog("[pi-router] Failed to read models from model registry:", err);
+    return undefined;
+  }
+}
+
+function getEffectiveModels(modelRegistry?: any): PiModel[] {
+  return modelsFromRegistry(modelRegistry) || loadModelsJson();
+}
+
+function filterConfigurableModels(models: PiModel[], allowedProviders: Set<string>): PiModel[] {
+  return models.filter((model) =>
+    model.provider !== "router" &&
+    model.api !== ROUTER_API &&
+    allowedProviders.has(model.provider)
+  );
+}
+
+function getConfigurableModels(modelRegistry?: any): PiModel[] {
+  const { authProviders, modelsProviders } = loadProviderIds();
+  const allowedProviders = new Set<string>([...authProviders, ...modelsProviders]);
+  return filterConfigurableModels(getEffectiveModels(modelRegistry), allowedProviders);
+}
+
+function buildModelMap(models: PiModel[]): Map<string, PiModel> {
+  const modelMap = new Map<string, PiModel>();
+  for (const model of models) {
+    if (model.provider === "router" || model.api === ROUTER_API) {
+      continue;
+    }
+    modelMap.set(`${model.id}@${model.provider}`, model);
+  }
+  return modelMap;
 }
 
 /**
@@ -400,7 +671,7 @@ function loadModelsJson(): PiModel[] {
     const content = fs.readFileSync(modelsPath, "utf-8");
     const data = JSON.parse(content);
     
-    // models.json structure: { providers: { providerName: { models: [...] } } }
+    // models.json structure: { providers: { providerName: { models?: [...], modelOverrides?: {...} } } }
     if (!data.providers || typeof data.providers !== "object") {
       console.warn("[pi-router] Invalid models.json structure (no providers)");
       return [];
@@ -410,29 +681,15 @@ function loadModelsJson(): PiModel[] {
     
     for (const [providerName, providerData] of Object.entries(data.providers)) {
       const provider = providerData as any;
-      
-      // Skip providers without models array
-      if (!provider.models || !Array.isArray(provider.models)) {
+      allModels.push(...expandProviderModels(providerName, provider));
+    }
+
+    const { authProviders } = loadProviderIds();
+    for (const providerName of authProviders) {
+      if (allModels.some(model => model.provider === providerName)) {
         continue;
       }
-      
-      for (const model of provider.models) {
-        const headers = provider.headers || model.headers
-          ? { ...(provider.headers || {}), ...(model.headers || {}) }
-          : undefined;
-        const compat = provider.compat || model.compat
-          ? { ...(provider.compat || {}), ...(model.compat || {}) }
-          : undefined;
-
-        allModels.push(normalizeModelForProvider({
-          ...model,
-          provider: providerName,
-          api: model.api || provider.api || "unknown",
-          baseUrl: model.baseUrl || provider.baseUrl,
-          headers,
-          compat,
-        }));
-      }
+      allModels.push(...expandProviderModels(providerName, {}));
     }
     
     // Update cache
@@ -505,6 +762,43 @@ function detectModelChanges(config: RouterConfig, currentModels: PiModel[]): Mod
   }
   
   return diff;
+}
+
+let configFileMtimeMs: number | null = null;
+
+function getFileMtimeMs(filePath: string): number | null {
+  try {
+    return fs.existsSync(filePath) ? fs.statSync(filePath).mtimeMs : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create a fresh config object (immutable pattern)
+ * FIX #3, #15: Avoid mutating config objects to prevent reference bugs
+ */
+function createConfigSnapshot(source: RouterConfig): RouterConfig {
+  return JSON.parse(JSON.stringify(source));
+}
+
+function refreshConfigFromDisk(config: RouterConfig): RouterConfig {
+  const configPath = getRouterConfigPath();
+  const mtimeMs = getFileMtimeMs(configPath);
+  if (configFileMtimeMs === mtimeMs) {
+    return config;
+  }
+
+  // FIX #3, #15: Create fresh config instead of mutating
+  const freshConfig = loadConfig();
+  configFileMtimeMs = mtimeMs;
+
+  // Update global references
+  autoSyncConfig = freshConfig;
+  routerState.customFooterEnabled = freshConfig.footer?.rightAlignRoute !== false;
+
+  debugLog("[pi-router] Reloaded config from disk");
+  return freshConfig;
 }
 
 /**
@@ -619,7 +913,8 @@ function writeConfigReadme(configPath: string): void {
 
 快捷命令：
 
-- \`/router config w\`：运行向导
+- \`/router config w\`：运行完整向导
+- \`/router config order\`：仅调整现有模型/渠道顺序
 - \`/router config s\`：显示当前配置
 - \`/router config r\`：重置配置
 
@@ -653,10 +948,13 @@ function writeConfigReadme(configPath: string): void {
  * Match config subcommand with shortcuts
  */
 function matchConfigSubcommand(input: string): string | null {
-  const commands = ["wizard", "show", "reset"];
+  const commands = ["wizard", "order", "show", "reset"];
   const aliases: Record<string, string> = {
     "w": "wizard",
     "wiz": "wizard",
+    "o": "order",
+    "ord": "order",
+    "reorder": "order",
     "s": "show",
     "sh": "show",
     "r": "reset",
@@ -720,9 +1018,12 @@ function showCurrentConfig(ctx: any, config: RouterConfig): void {
   }
   
   lines.push("");
+  lines.push("  auto 模式会按上面的模型顺序依次尝试；某个模型成功后就不会继续往后尝试。");
+  lines.push("");
   lines.push(`配置文件: ~/.pi/agent/pi-router.json`);
   lines.push("");
-  lines.push("运行 /router config wizard 重新配置");
+  lines.push("运行 /router config order 调整现有模型/渠道顺序");
+  lines.push("运行 /router config wizard 重新跑完整配置向导");
   lines.push("运行 /reload 应用配置更改");
   
   ctx.ui.notify(lines.join("\n"), "info");
@@ -853,7 +1154,8 @@ async function showRouterMenu(ctx: any, config: RouterConfig): Promise<void> {
  */
 async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
   const items: SelectItem[] = [
-    { value: "wizard", label: "wizard", description: "Interactive configuration wizard (recommended)" },
+    { value: "wizard", label: "wizard", description: "Interactive full configuration wizard" },
+    { value: "order", label: "order", description: "Adjust existing model/channel order only" },
     { value: "show", label: "show", description: "Show current configuration" },
     { value: "reset", label: "reset", description: "Reset to default configuration" },
   ];
@@ -888,11 +1190,19 @@ async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
     case "wizard":
       await runConfigWizard(
         ctx,
-        loadModelsJson,
+        () => getConfigurableModels(ctx.modelRegistry),
         groupModelsByChannels,
         saveConfig,
         calculateFileHash,
         getModelsJsonPath
+      );
+      break;
+    case "order":
+      await runConfigOrderWizard(
+        ctx,
+        config,
+        () => getConfigurableModels(ctx.modelRegistry),
+        saveConfig,
       );
       break;
     case "show":
@@ -1239,6 +1549,7 @@ let routerHandlerRef: ((args: string, ctx: any) => Promise<void>) | null = null;
  */
 export default function (pi: ExtensionAPI) {
   const config = loadConfig();
+  configFileMtimeMs = getFileMtimeMs(getRouterConfigPath());
 
   // Store config for auto-sync check
   autoSyncConfig = config;
@@ -1391,7 +1702,8 @@ export default function (pi: ExtensionAPI) {
       const firstCmd = parts[0].toLowerCase();
       if (firstCmd === 'config' || firstCmd === 'c') {
         const configSubcommands = [
-          { value: "wizard", label: "wizard (w)", description: "Interactive configuration wizard" },
+          { value: "wizard", label: "wizard (w)", description: "Interactive full configuration wizard" },
+          { value: "order", label: "order (o)", description: "Adjust existing model/channel order only" },
           { value: "show", label: "show (s)", description: "Show current configuration" },
           { value: "reset", label: "reset (r)", description: "Reset to default configuration" },
         ];
@@ -1427,6 +1739,7 @@ export default function (pi: ExtensionAPI) {
  * Router command handler implementation
  */
 async function routerHandler(args: string, ctx: any, config: RouterConfig): Promise<void> {
+  refreshConfigFromDisk(config);
   const trimmedArgs = args.trim();
   
   // If no args provided, show interactive menu
@@ -1455,11 +1768,18 @@ async function routerHandler(args: string, ctx: any, config: RouterConfig): Prom
       // Run configuration wizard
       await runConfigWizard(
         ctx,
-        loadModelsJson,
+        () => getConfigurableModels(ctx.modelRegistry),
         groupModelsByChannels,
         saveConfig,
         calculateFileHash,
         getModelsJsonPath
+      );
+    } else if (matchedSubcmd === "order") {
+      await runConfigOrderWizard(
+        ctx,
+        config,
+        () => getConfigurableModels(ctx.modelRegistry),
+        saveConfig,
       );
     } else if (matchedSubcmd === "show") {
       // Show current configuration
@@ -1684,7 +2004,7 @@ async function routerHandler(args: string, ctx: any, config: RouterConfig): Prom
     
     if (action === "accept") {
       // Apply changes
-      const currentModels = loadModelsJson();
+      const currentModels = getConfigurableModels(ctx.modelRegistry);
       const diff = detectModelChanges(config, currentModels);
       
       // Remove deleted models
@@ -1731,7 +2051,7 @@ async function routerHandler(args: string, ctx: any, config: RouterConfig): Prom
       );
     } else {
       // Show diff
-      const currentModels = loadModelsJson();
+      const currentModels = getConfigurableModels(ctx.modelRegistry);
       const diff = detectModelChanges(config, currentModels);
       const hasChanges = diff.added.length > 0 || diff.removed.length > 0 || diff.modified.length > 0;
       
@@ -1772,7 +2092,7 @@ async function routerHandler(args: string, ctx: any, config: RouterConfig): Prom
       }
     }
   } else if (subcommand === "diff") {
-    const currentModels = loadModelsJson();
+    const currentModels = getConfigurableModels(ctx.modelRegistry);
     const currentGroups = groupModelsByChannels(currentModels);
     const configModels = config.models || [];
     
@@ -2281,17 +2601,69 @@ const routerState: RouterState = {
   lastFailures: new Map(),
 };
 
+// FIX #1, #10: Cache modelMap to avoid rebuilding on every request
+let cachedModelMap: Map<string, PiModel> | null = null;
+let cachedModelMapTimestamp = 0;
+let cachedModelMapRegistryRef: any = null;
+
+/**
+ * Get or build modelMap with caching
+ * FIX #1, #10: Cache modelMap and invalidate on config/registry changes
+ */
+function getCachedModelMap(modelRegistry?: any): Map<string, PiModel> {
+  const now = Date.now();
+  const configMtime = getFileMtimeMs(getRouterConfigPath());
+  const modelsMtime = getFileMtimeMs(getModelsJsonPath());
+
+  // Invalidate cache if:
+  // 1. No cache exists
+  // 2. Config file changed (mtime check via configFileMtimeMs)
+  // 3. Models file changed (covered by loadModelsJson cache)
+  // 4. Model registry reference changed
+  // 5. Cache is older than 60 seconds (same as models cache TTL)
+  const shouldRebuild = !cachedModelMap ||
+    cachedModelMapRegistryRef !== modelRegistry ||
+    (now - cachedModelMapTimestamp > CACHE_TTL);
+
+  if (shouldRebuild) {
+    cachedModelMap = buildModelMap(getEffectiveModels(modelRegistry));
+    cachedModelMapTimestamp = now;
+    cachedModelMapRegistryRef = modelRegistry;
+    debugLog("[pi-router] Rebuilt modelMap cache");
+  }
+
+  return cachedModelMap;
+}
+
+/**
+ * FIX #9, #14: Use first configured channel, not first available
+ * This preserves user's explicit failover order
+ */
+function findFirstConfiguredModel(
+  configModel: RouterModelConfig,
+  modelMap: Map<string, PiModel>
+): { channel: string; model: PiModel } | undefined {
+  // Try channels in configured order
+  for (const channel of configModel.channels) {
+    const model = modelMap.get(`${configModel.id}@${channel}`);
+    if (model) {
+      return { channel, model };
+    }
+  }
+  return undefined;
+}
+
 function createMirrorModels(
   configuredModels: RouterModelConfig[],
   modelMap: Map<string, PiModel>
 ): any[] {
   const mirrorModels: any[] = [];
-  
+
   // Add the special "router" meta-model (auto mode)
-  // Uses the first configured model's properties as defaults
+  // FIX #14: Use first configured model (not first available) for defaults
   const firstConfigModel = configuredModels[0];
-  const firstPrimaryKey = `${firstConfigModel.id}@${firstConfigModel.channels[0]}`;
-  const firstPrimaryModel = modelMap.get(firstPrimaryKey);
+  const firstConfigured = firstConfigModel ? findFirstConfiguredModel(firstConfigModel, modelMap) : undefined;
+  const firstPrimaryModel = firstConfigured?.model;
   
   if (firstPrimaryModel) {
     mirrorModels.push({
@@ -2312,12 +2684,12 @@ function createMirrorModels(
   }
   
   for (const configModel of configuredModels) {
-    const primaryChannel = configModel.channels[0];
-    const primaryKey = `${configModel.id}@${primaryChannel}`;
-    const primaryModel = modelMap.get(primaryKey);
-    
+    // FIX #14: Use first configured channel for primary model
+    const primary = findFirstConfiguredModel(configModel, modelMap);
+    const primaryModel = primary?.model;
+
     if (!primaryModel) {
-      console.warn(`[pi-router] Primary model not found: ${primaryKey}`);
+      console.warn(`[pi-router] No available model found for configured router/${configModel.id}`);
       continue;
     }
     
@@ -2379,10 +2751,21 @@ function registerRouterProvider(
     apiKey: "router",  // Dummy API key for custom provider
     models: mirrorModels,
     streamSimple: (model: any, context: any, options?: any) => {
+      // FIX #3: Get fresh config if it changed on disk
+      const currentConfig = refreshConfigFromDisk(config);
+
       // Check auto-sync on first use (if not already checked)
       checkAutoSyncOnce();
 
-      return routeRequest(model, context, options, config, modelMap, pi);
+      return routeRequest(
+        model,
+        context,
+        options,
+        currentConfig,
+        // FIX #1, #10, #15: Use cached modelMap instead of rebuilding on every request
+        getCachedModelMap(routerState.currentModelRegistry),
+        pi,
+      );
     },
   });
   
@@ -4346,16 +4729,11 @@ async function probeChannel(
   const startTime = Date.now();
   
   try {
-    // Build model map from current models
-    const currentModels = loadModelsJson();
-    const modelMap = new Map<string, PiModel>();
-    for (const model of currentModels) {
-      const key = `${model.id}@${model.provider}`;
-      modelMap.set(key, model);
-    }
-    
+    // FIX #15: Use cached modelMap instead of rebuilding
+    const modelMap = getCachedModelMap(routerState.currentModelRegistry);
+
     const targetModel = modelMap.get(key);
-    
+
     if (!targetModel) {
       throw new Error(`Model not found: ${key}`);
     }
@@ -4510,6 +4888,10 @@ export {
   isAbortError,
   createMirrorModels,
   createFailoverStream,
+  expandProviderModels,
+  modelsFromRegistry,
+  filterConfigurableModels,
+  buildModelMap,
   __testResetInternalState,
   __testGetInternalState,
 };

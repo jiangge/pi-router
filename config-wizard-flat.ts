@@ -42,16 +42,33 @@ export class FlatOrderEditor implements Component {
   ) {
     // Build flat list from models
     this.items = [];
+    const seen = new Set<string>();
 
     if (initialOrder && initialOrder.length > 0) {
-      // Use provided order
+      // Use provided order first
       for (const item of initialOrder) {
-        const [modelId, channelName] = item.split("@");
+        // FIX #4: Validate format before splitting
+        if (!item || typeof item !== 'string' || !item.includes('@')) {
+          console.warn(`[pi-router] Invalid custom order entry (missing '@'): ${item}`);
+          continue;
+        }
+
+        const parts = item.split("@");
+        if (parts.length !== 2) {
+          console.warn(`[pi-router] Invalid custom order entry (malformed): ${item}`);
+          continue;
+        }
+
+        const [modelId, channelName] = parts;
         const model = models.find(m => m.id === modelId);
         if (!model) continue;
 
         const channel = model.channels.find(ch => ch.channel === channelName);
         if (!channel) continue;
+
+        const key = `${modelId}@${channelName}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
 
         this.items.push({
           model: modelId,
@@ -60,22 +77,27 @@ export class FlatOrderEditor implements Component {
           category: channel.category,
         });
       }
-    } else {
-      // Generate initial order using "modelFirst" logic
-      const maxChannels = Math.max(...models.map(m => m.channels.length));
+    }
 
-      for (let i = 0; i < maxChannels; i++) {
-        for (const model of models) {
-          if (i < model.channels.length) {
-            const ch = model.channels[i];
-            this.items.push({
-              model: model.id,
-              channel: ch.channel,
-              reason: ch.reason,
-              category: ch.category,
-            });
-          }
-        }
+    // Append any newly discovered model@channel pairs that were not present in
+    // the saved custom order, using the default model-first layout.
+    const maxChannels = Math.max(...models.map(m => m.channels.length));
+
+    for (let i = 0; i < maxChannels; i++) {
+      for (const model of models) {
+        if (i >= model.channels.length) continue;
+
+        const ch = model.channels[i];
+        const key = `${model.id}@${ch.channel}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        this.items.push({
+          model: model.id,
+          channel: ch.channel,
+          reason: ch.reason,
+          category: ch.category,
+        });
       }
     }
 
