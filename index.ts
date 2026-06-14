@@ -435,9 +435,14 @@ function expandProviderModels(providerName: string, provider: any): PiModel[] {
 
         const builtinModel = builtinModels.find(model => model.id === modelId);
         if (!builtinModel) {
-          // FIX #6: Surface error to user, not just debug log
-          console.warn(`[pi-router] Warning: modelOverrides entry '${providerName}.${modelId}' has no builtin model to extend. Check that the model ID is correct.`);
-          debugLog(`[pi-router] Available builtin models for ${providerName}:`, builtinModels.map(m => m.id));
+          // FIX #6: Only warn if this provider actually has builtin models but this ID is missing
+          // OAuth providers like 'kiro' have no builtin models, so missing is expected
+          if (builtinModels.length > 0) {
+            console.warn(`[pi-router] Warning: modelOverrides entry '${providerName}.${modelId}' has no builtin model to extend. Check that the model ID is correct.`);
+            debugLog(`[pi-router] Available builtin models for ${providerName}:`, builtinModels.map(m => m.id));
+          } else {
+            debugLog(`[pi-router] Skipping modelOverrides entry '${providerName}.${modelId}': no builtin models available (OAuth provider)`);
+          }
           continue;
         }
 
@@ -469,9 +474,14 @@ function expandProviderModels(providerName: string, provider: any): PiModel[] {
     for (const [modelId, overrideData] of Object.entries(provider.modelOverrides)) {
       const builtinModel = builtinModels.find(model => model.id === modelId);
       if (!builtinModel) {
-        // FIX #6: Surface error to user, not just debug log
-        console.warn(`[pi-router] Warning: modelOverrides entry '${providerName}.${modelId}' has no builtin model to extend. Check that the model ID is correct.`);
-        debugLog(`[pi-router] Available builtin models for ${providerName}:`, builtinModels.map(m => m.id));
+        // FIX #6: Only warn if this provider actually has builtin models but this ID is missing
+        // OAuth providers like 'kiro' have no builtin models, so missing is expected
+        if (builtinModels.length > 0) {
+          console.warn(`[pi-router] Warning: modelOverrides entry '${providerName}.${modelId}' has no builtin model to extend. Check that the model ID is correct.`);
+          debugLog(`[pi-router] Available builtin models for ${providerName}:`, builtinModels.map(m => m.id));
+        } else {
+          debugLog(`[pi-router] Skipping modelOverrides entry '${providerName}.${modelId}': no builtin models available (OAuth provider)`);
+        }
         continue;
       }
 
