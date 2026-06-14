@@ -19,7 +19,7 @@ Pi 的智能路由层，提供多级故障转移与可观测性。
 
 ## 特性
 
-- **Auto Router 模式** — 选择 `router/router` 即可全自动路由
+- **Auto Router 模式** — 选择 `router/auto` 即可全自动路由
 - 同一模型跨多个提供商的通道故障转移
 - 模型降级与上下文迁移
 - 按延迟、能力、成本或手动顺序的智能路由
@@ -58,7 +58,7 @@ pi install /path/to/pi-router
 
 向导步骤：
 
-1. 路由策略（`channelFirst` / `modelFirst`）
+1. 路由策略（`channelFirst` / `custom`）
 2. 排序策略（`latency` / `capabilityFirst` / `cost` / `manual`）
 3. 自动同步（`启用` / `禁用`）
 4. 健康探测（`10 分钟` / `禁用`）
@@ -95,7 +95,7 @@ pi install /path/to/pi-router
 在 pi 中选择 Auto Router 模型：
 
 ```text
-/model router/router
+/model router/auto
 ```
 
 所有请求将按你配置的策略和模型链自动路由。
@@ -124,6 +124,7 @@ pi-router 会：
 
 ```text
 /router config wizard    # 交互式配置向导
+/router config order     # 仅调整已有模型/渠道顺序
 /router config show      # 显示当前配置
 /router config reset     # 重置为默认配置
 ```
@@ -132,6 +133,7 @@ pi-router 会：
 
 ```text
 /router config w         # = wizard
+/router config o         # = order
 /router config s         # = show
 /router config r         # = reset
 ```
@@ -165,12 +167,12 @@ pi-router 会：
 
 ## 工作原理
 
-### Auto Router（`router/router`）
+### Auto Router（`router/auto`）
 
-选择 `router/router` 时，pi-router 管理完整的模型链：
+选择 `router/auto` 时，pi-router 管理完整的模型链：
 
 ```text
-用户请求: router/router
+用户请求: router/auto
     ↓
 检查粘性记录 → 找到 "model-X@channel-Y"？
     ↓ 是                     ↓ 否
@@ -179,7 +181,7 @@ pi-router 会：
 清除粘性，回退到策略顺序
     ↓
 channelFirst: Model-A[ch1,ch2,ch3] → Model-B[ch1,ch2] → ...
-modelFirst:   [Model-A@ch1, Model-B@ch1] → [Model-A@ch2, Model-B@ch2] → ...
+custom:       按 customOrder 中显式配置的 model@channel 顺序尝试
     ↓
 成功: 更新粘性记录，流式返回响应
     ↓

@@ -11,6 +11,8 @@
     "config-wizard.ts",
     "config-wizard-ui.ts",
     "config-wizard-flow.ts",
+    "config-wizard-two-tier.ts",
+    "config-wizard-flat.ts",
     "examples",
     "README.md",
     "README.zh-CN.md",
@@ -53,9 +55,13 @@
     "node": ">=18.0.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.79.0"
+    "@earendil-works/pi-coding-agent": ">=0.79.0",
+    "@earendil-works/pi-ai": ">=0.79.1",
+    "@earendil-works/pi-tui": ">=0.79.2"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.79.1",
+    "@earendil-works/pi-tui": "^0.79.2",
     "@types/node": "^20.0.0",
     "@vitest/coverage-v8": "^4.1.8",
     "typescript": "^5.0.0",
@@ -70,8 +76,5 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
-  "dependencies": {
-    "@earendil-works/pi-ai": "^0.79.1",
-    "@earendil-works/pi-tui": "^0.79.2"
-  }
+  "dependencies": {}
 }

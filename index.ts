@@ -1,8 +1,8 @@
 /**
- * pi-router v0.3.0-alpha
- * Transparent two-tier router for pi coding agent
- * 
- * Routes channels (same model, different providers) with opt-in model fallback chain.
+ * pi-router v0.3.1
+ * Intelligent routing layer for pi coding agent
+ *
+ * Routes channels (same model, different providers) with optional fallback models.
  * Real model identity end-to-end — zero protocol coupling with pi-cache-optimizer.
  */
 
@@ -285,11 +285,13 @@ type ModelDiff = {
   }>;
 };
 
+let piConfigDirOverride: string | null = null;
+
 /**
  * Get pi config directory
  */
 function getPiConfigDir(): string {
-  return path.join(os.homedir(), ".pi", "agent");
+  return piConfigDirOverride || path.join(os.homedir(), ".pi", "agent");
 }
 
 /**
@@ -659,19 +661,29 @@ function calculateFileHash(filePath: string): string {
 // Cache for loaded models to avoid re-parsing on every call
 let modelsCache: PiModel[] | null = null;
 let modelsCacheTimestamp = 0;
+let modelsCacheModelsMtime: number | null = null;
+let modelsCacheAuthMtime: number | null = null;
 const CACHE_TTL = 60000; // 1 minute cache
 
 /**
  * Load models from models.json (with caching)
  */
 function loadModelsJson(): PiModel[] {
-  // Return cached models if still valid
   const now = Date.now();
-  if (modelsCache && (now - modelsCacheTimestamp < CACHE_TTL)) {
+  const modelsPath = getModelsJsonPath();
+  const authPath = path.join(getPiConfigDir(), "auth.json");
+  const modelsMtime = getFileMtimeMs(modelsPath);
+  const authMtime = getFileMtimeMs(authPath);
+
+  if (
+    modelsCache &&
+    modelsCacheModelsMtime === modelsMtime &&
+    modelsCacheAuthMtime === authMtime &&
+    (now - modelsCacheTimestamp < CACHE_TTL)
+  ) {
     return modelsCache;
   }
   
-  const modelsPath = getModelsJsonPath();
   if (!fs.existsSync(modelsPath)) {
     console.warn("[pi-router] models.json not found:", modelsPath);
     return [];
@@ -705,6 +717,8 @@ function loadModelsJson(): PiModel[] {
     // Update cache
     modelsCache = allModels;
     modelsCacheTimestamp = now;
+    modelsCacheModelsMtime = modelsMtime;
+    modelsCacheAuthMtime = authMtime;
     
     return allModels;
   } catch (err) {
@@ -775,6 +789,7 @@ function detectModelChanges(config: RouterConfig, currentModels: PiModel[]): Mod
 }
 
 let configFileMtimeMs: number | null = null;
+let currentRouterConfig: RouterConfig | null = null;
 
 function getFileMtimeMs(filePath: string): number | null {
   try {
@@ -784,31 +799,29 @@ function getFileMtimeMs(filePath: string): number | null {
   }
 }
 
-/**
- * Create a fresh config object (immutable pattern)
- * FIX #3, #15: Avoid mutating config objects to prevent reference bugs
- */
-function createConfigSnapshot(source: RouterConfig): RouterConfig {
-  return JSON.parse(JSON.stringify(source));
+function setCurrentRouterConfig(config: RouterConfig): RouterConfig {
+  currentRouterConfig = config;
+  autoSyncConfig = config;
+  routerState.customFooterEnabled = config.footer?.rightAlignRoute !== false;
+  return config;
 }
 
-function refreshConfigFromDisk(config: RouterConfig): RouterConfig {
+function getCurrentRouterConfig(): RouterConfig {
+  return currentRouterConfig || setCurrentRouterConfig(loadConfig());
+}
+
+function refreshConfigFromDisk(config?: RouterConfig): RouterConfig {
   const configPath = getRouterConfigPath();
   const mtimeMs = getFileMtimeMs(configPath);
+  const currentConfig = currentRouterConfig || config || loadConfig();
   if (configFileMtimeMs === mtimeMs) {
-    return config;
+    return currentConfig;
   }
 
-  // FIX #3, #15: Create fresh config instead of mutating
   const freshConfig = loadConfig();
   configFileMtimeMs = mtimeMs;
-
-  // Update global references
-  autoSyncConfig = freshConfig;
-  routerState.customFooterEnabled = freshConfig.footer?.rightAlignRoute !== false;
-
   debugLog("[pi-router] Reloaded config from disk");
-  return freshConfig;
+  return setCurrentRouterConfig(freshConfig);
 }
 
 /**
@@ -863,6 +876,8 @@ function saveConfig(config: RouterConfig): void {
   try {
     fs.writeFileSync(configPath, JSON.stringify(addConfigComments(config), null, 2), "utf-8");
     writeConfigReadme(configPath);
+    configFileMtimeMs = getFileMtimeMs(configPath);
+    setCurrentRouterConfig(config);
     debugLog("[pi-router] Config saved:", configPath);
   } catch (err) {
     console.error("[pi-router] Failed to save config:", err);
@@ -1089,7 +1104,7 @@ async function confirmReset(ctx: any): Promise<boolean> {
 /**
  * Reset configuration to defaults
  */
-function resetConfig(): void {
+function resetConfig(): RouterConfig {
   const defaultConfig: RouterConfig = {
     strategy: "channelFirst",
     sortBy: "latency",
@@ -1107,6 +1122,7 @@ function resetConfig(): void {
   
   saveConfig(defaultConfig);
   debugLog("[pi-router] Config reset to defaults");
+  return getCurrentRouterConfig();
 }
 
 /**
@@ -1128,7 +1144,7 @@ async function showRouterMenu(ctx: any, config: RouterConfig): Promise<void> {
 
   const result = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: any) => {
     const container = new Container();
-    container.addChild(new Text(theme.fg("accent", theme.bold("\u2554 Pi-Router (v0.3.0-alpha)")), 1, 1));
+    container.addChild(new Text(theme.fg("accent", theme.bold("\u2554 Pi-Router (v0.3.1)")), 1, 1));
     container.addChild(new Text(theme.fg("dim", "\u2500".repeat(40)), 1, 0));
 
     const selectList = new SelectList(items, items.length, {
@@ -1558,11 +1574,8 @@ let routerHandlerRef: ((args: string, ctx: any) => Promise<void>) | null = null;
  * Auto-sync check is deferred to first use or background (30s after startup)
  */
 export default function (pi: ExtensionAPI) {
-  const config = loadConfig();
+  const config = setCurrentRouterConfig(loadConfig());
   configFileMtimeMs = getFileMtimeMs(getRouterConfigPath());
-
-  // Store config for auto-sync check
-  autoSyncConfig = config;
 
   // Check if we have configured models
   const hasConfiguredModels = config.models && config.models.length > 0;
@@ -1629,13 +1642,13 @@ export default function (pi: ExtensionAPI) {
     }, 1000);
   }
   
-  debugLog("[pi-router] Extension loaded (v0.3.0-alpha)");
+  debugLog("[pi-router] Extension loaded (v0.3.1)");
   debugLog("[pi-router] Strategy:", config.strategy ?? "channelFirst");
   debugLog("[pi-router] Configured models:", config.models?.length ?? 0);
   
-  // Do not replace pi's built-in footer by default. Other extensions (for
-  // example cache optimizers) may own a custom footer; pi-router should only
-  // add a short status item unless the user explicitly opts into replacement.
+  // By default pi-router owns the footer replacement when router status is
+  // active. Users can opt out with footer.rightAlignRoute = false if another
+  // extension should keep the built-in footer layout.
   routerState.customFooterEnabled = config.footer?.rightAlignRoute !== false;
   const updateFooterContext = (ctx: any) => {
     refreshFooterContext(ctx, typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined);
@@ -1727,13 +1740,13 @@ export default function (pi: ExtensionAPI) {
       return null;
     },
     handler: async (args: string, ctx: any) => {
-      await routerHandler(args, ctx, config);
+      await routerHandler(args, ctx);
     },
   });
   
   // Store handler reference for menu re-dispatch
   routerHandlerRef = async (args: string, ctx: any) => {
-    await routerHandler(args, ctx, config);
+    await routerHandler(args, ctx);
   };
   
   debugLog("[pi-router] /router command registered");
@@ -1748,8 +1761,8 @@ export default function (pi: ExtensionAPI) {
 /**
  * Router command handler implementation
  */
-async function routerHandler(args: string, ctx: any, config: RouterConfig): Promise<void> {
-  refreshConfigFromDisk(config);
+async function routerHandler(args: string, ctx: any): Promise<void> {
+  const config = refreshConfigFromDisk();
   const trimmedArgs = args.trim();
   
   // If no args provided, show interactive menu
@@ -2210,7 +2223,7 @@ async function routerHandler(args: string, ctx: any, config: RouterConfig): Prom
     ctx.ui.notify(lines.join("\n"), "info");
   } else {
     ctx.ui.notify(
-      "pi-router v0.3.0-alpha\n\n" +
+      "pi-router v0.3.1\n\n" +
       "Commands:\n" +
       "  /router config    - Configuration management\n" +
       "  /router status    - Show router status\n" +
@@ -2237,7 +2250,6 @@ async function routerHandler(args: string, ctx: any, config: RouterConfig): Prom
  * @param summaryModel - Model to use for generating summary (defaults to target model when not configured)
  * @param promptTemplate - Custom summary prompt
  * @param summaryMaxTokens - Target upper bound for summary output size
- * @param pi - ExtensionAPI instance
  */
 async function generateContextSummary(
   messages: any[],
@@ -2246,7 +2258,7 @@ async function generateContextSummary(
   summaryModel: PiModel,
   promptTemplate: string,
   summaryMaxTokens: number,
-  _pi: any
+  config?: RouterConfig
 ): Promise<SummaryResult> {
   // Build conversation context (outside try block so it's accessible in catch)
   const conversationText = messages
@@ -2276,28 +2288,7 @@ Provide the summary now:`;
     debugLog(`[pi-router] From: ${fromModel.id}@${fromModel.provider}`);
     debugLog(`[pi-router] To: ${toModel.id}@${toModel.provider}`);
     debugLog(`[pi-router] Using summary model: ${summaryModel.id}@${summaryModel.provider}`);
-    
-    // Convert PiModel to pi-ai Model format
-    const realSummaryModel: Model<Api> = {
-      id: summaryModel.id,
-      provider: summaryModel.provider,
-      api: summaryModel.api as Api,
-      name: summaryModel.id,
-      baseUrl: "",
-      input: ["text"],
-      cost: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-      },
-      contextWindow: 128000,
-      maxTokens: 8192,
-      compat: summaryModel.compat,
-      reasoning: summaryModel.reasoning,
-    };
-    
-    // Create context for summary request
+
     const summaryContext: Context = {
       messages: [
         {
@@ -2307,35 +2298,10 @@ Provide the summary now:`;
         },
       ],
     };
-    
-    // Call streamSimple to generate summary
-    const stream = streamSimple(realSummaryModel, summaryContext, undefined);
-    
-    // Collect the response
-    let summary = "";
-    let tokensUsed = 0;
-    
-    for await (const event of stream) {
-      if (event.type === "text_delta") {
-        summary += event.delta;
-      } else if (event.type === "done") {
-        // Usage info may be available in done event or elsewhere
-        // For now, estimate based on response length
-        tokensUsed = Math.ceil(summary.length / 4);
-      }
-    }
-    
-    if (!summary || summary.trim().length === 0) {
-      throw new Error("Summary generation returned empty response");
-    }
-    
-    debugLog(`[pi-router] Summary generated: ${summary.length} chars, ${tokensUsed} tokens`);
-    
-    return {
-      success: true,
-      summary: summary.trim(),
-      tokensUsed,
-    };
+
+    const result = await generateSummaryWithModel(summaryModel, summaryPrompt, summaryMaxTokens, config, summaryContext);
+    debugLog(`[pi-router] Summary generated: ${result.summary?.length || 0} chars, ${result.tokensUsed || 0} tokens`);
+    return result;
   } catch (err) {
     debugLog("[pi-router] Failed to generate summary with summaryModel:", err);
 
@@ -2345,8 +2311,8 @@ Provide the summary now:`;
       
       // Fallback strategy 1: Try using the target model (toModel) itself
       try {
-        const targetModelResult = await generateSummaryWithModel(toModel, summaryPrompt);
-        debugLog(`[pi-router] Summary generated with target model: ${targetModelResult.summary.length} chars`);
+        const targetModelResult = await generateSummaryWithModel(toModel, summaryPrompt, summaryMaxTokens, config);
+        debugLog(`[pi-router] Summary generated with target model: ${targetModelResult.summary?.length || 0} chars`);
         return targetModelResult;
       } catch (fallbackErr) {
         debugLog("[pi-router] Target model also failed:", fallbackErr);
@@ -2367,35 +2333,58 @@ Provide the summary now:`;
   }
 }
 
+async function collectTextResponseFromModel(
+  model: PiModel,
+  context: Context,
+  maxTokens: number,
+  config?: RouterConfig
+): Promise<{ text: string; tokensUsed: number }> {
+  const requestOptions: SimpleStreamOptions | undefined = maxTokens > 0
+    ? { maxTokens }
+    : undefined;
+  const stream = forwardToProvider(model, context, requestOptions, config);
+
+  let text = "";
+  let tokensUsed = 0;
+
+  for await (const event of stream) {
+    const failure = getStreamEventFailure(event);
+    if (failure) {
+      throw new Error(failure);
+    }
+
+    if (event.type === "text_delta") {
+      text += event.delta;
+    } else if (event.type === "text_end" && !text && event.content) {
+      text += event.content;
+    } else if (event.type === "done") {
+      const usage = event.message?.usage;
+      tokensUsed = usage?.output ?? usage?.totalTokens ?? Math.ceil(text.length / 4);
+    }
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error("Summary generation returned empty response");
+  }
+
+  return {
+    text: trimmed,
+    tokensUsed: tokensUsed || Math.ceil(trimmed.length / 4),
+  };
+}
+
 /**
  * Helper function to generate summary using a specific model
  */
 async function generateSummaryWithModel(
   model: PiModel,
-  summaryPrompt: string
+  summaryPrompt: string,
+  summaryMaxTokens: number,
+  config?: RouterConfig,
+  summaryContext?: Context,
 ): Promise<SummaryResult> {
-  // Convert PiModel to pi-ai Model format
-  const realModel: Model<Api> = {
-    id: model.id,
-    provider: model.provider,
-    api: model.api as Api,
-    name: model.id,
-    baseUrl: "",
-    input: ["text"],
-    cost: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-    },
-    contextWindow: 128000,
-    maxTokens: 8192,
-    compat: model.compat,
-    reasoning: model.reasoning,
-  };
-  
-  // Create context for summary request
-  const summaryContext: Context = {
+  const context = summaryContext || {
     messages: [
       {
         role: "user",
@@ -2404,30 +2393,13 @@ async function generateSummaryWithModel(
       },
     ],
   };
-  
-  // Call streamSimple to generate summary
-  const stream = streamSimple(realModel, summaryContext, undefined);
-  
-  // Collect the response
-  let summary = "";
-  let tokensUsed = 0;
-  
-  for await (const event of stream) {
-    if (event.type === "text_delta") {
-      summary += event.delta;
-    } else if (event.type === "done") {
-      tokensUsed = Math.ceil(summary.length / 4);
-    }
-  }
-  
-  if (!summary || summary.trim().length === 0) {
-    throw new Error("Summary generation returned empty response");
-  }
-  
+
+  const result = await collectTextResponseFromModel(model, context, summaryMaxTokens, config);
+
   return {
     success: true,
-    summary: summary.trim(),
-    tokensUsed,
+    summary: result.text,
+    tokensUsed: result.tokensUsed,
   };
 }
 
@@ -2615,6 +2587,8 @@ const routerState: RouterState = {
 let cachedModelMap: Map<string, PiModel> | null = null;
 let cachedModelMapTimestamp = 0;
 let cachedModelMapRegistryRef: any = null;
+let cachedModelMapModelsMtime: number | null = null;
+let cachedModelMapAuthMtime: number | null = null;
 
 /**
  * Get or build modelMap with caching
@@ -2622,23 +2596,21 @@ let cachedModelMapRegistryRef: any = null;
  */
 function getCachedModelMap(modelRegistry?: any): Map<string, PiModel> {
   const now = Date.now();
-  const configMtime = getFileMtimeMs(getRouterConfigPath());
   const modelsMtime = getFileMtimeMs(getModelsJsonPath());
+  const authMtime = getFileMtimeMs(path.join(getPiConfigDir(), "auth.json"));
 
-  // Invalidate cache if:
-  // 1. No cache exists
-  // 2. Config file changed (mtime check via configFileMtimeMs)
-  // 3. Models file changed (covered by loadModelsJson cache)
-  // 4. Model registry reference changed
-  // 5. Cache is older than 60 seconds (same as models cache TTL)
   const shouldRebuild = !cachedModelMap ||
     cachedModelMapRegistryRef !== modelRegistry ||
+    cachedModelMapModelsMtime !== modelsMtime ||
+    cachedModelMapAuthMtime !== authMtime ||
     (now - cachedModelMapTimestamp > CACHE_TTL);
 
   if (shouldRebuild) {
     cachedModelMap = buildModelMap(getEffectiveModels(modelRegistry));
     cachedModelMapTimestamp = now;
     cachedModelMapRegistryRef = modelRegistry;
+    cachedModelMapModelsMtime = modelsMtime;
+    cachedModelMapAuthMtime = authMtime;
     debugLog("[pi-router] Rebuilt modelMap cache");
   }
 
@@ -2761,8 +2733,8 @@ function registerRouterProvider(
     apiKey: "router",  // Dummy API key for custom provider
     models: mirrorModels,
     streamSimple: (model: any, context: any, options?: any) => {
-      // FIX #3: Get fresh config if it changed on disk
-      const currentConfig = refreshConfigFromDisk(config);
+      // Get the latest config if it changed on disk.
+      const currentConfig = refreshConfigFromDisk();
 
       // Check auto-sync on first use (if not already checked)
       checkAutoSyncOnce();
@@ -2774,7 +2746,6 @@ function registerRouterProvider(
         currentConfig,
         // FIX #1, #10, #15: Use cached modelMap instead of rebuilding on every request
         getCachedModelMap(routerState.currentModelRegistry),
-        pi,
       );
     },
   });
@@ -3213,111 +3184,6 @@ function routeAutoCustom(
 }
 
 /**
- * Auto mode with custom strategy (deprecated name, kept for compatibility)
- * @deprecated Use routeAutoCustom instead
- */
-function routeAutoModelFirst(
-  context: Context,
-  options: SimpleStreamOptions | undefined,
-  config: RouterConfig,
-  modelMap: Map<string, PiModel>,
-  configuredModels: RouterModelConfig[],
-  stickyRecord: StickyRecord | undefined
-): AssistantMessageEventStream {
-  const eventStream = createAssistantMessageEventStream();
-  const attemptedRoutes: string[] = [];
-  const attemptedChannels: string[] = [];
-  
-  (async () => {
-    try {
-      // Try sticky route first if available
-      if (stickyRecord) {
-        const stickyKey = `${stickyRecord.modelId}@${stickyRecord.channel}`;
-        const stickyModel = modelMap.get(stickyKey);
-        const stickyModelConfig = configuredModels.find(m => m.id === stickyRecord.modelId);
-        
-        if (stickyModel && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
-          debugLog(`[pi-router] Auto mode: trying sticky ${stickyKey}`);
-          const ok = await relayAutoAttempt(
-            "auto",
-            stickyModelConfig,
-            stickyRecord.channel,
-            stickyModel,
-            "sticky route",
-            config.sortBy || "manual",
-            context,
-            options,
-            config,
-            eventStream,
-            attemptedRoutes,
-            attemptedChannels
-          );
-          if (ok) return;
-          debugLog(`[pi-router] Auto mode: sticky ${stickyKey} failed, falling back`);
-          clearStickyRecord("auto", config);
-        } else {
-          debugLog(`[pi-router] Auto mode: sticky model unavailable, clearing`);
-          clearStickyRecord("auto", config);
-        }
-      }
-      
-      // Normal model-first routing
-      const maxChannels = Math.max(...configuredModels.map(m => m.channels.length));
-      
-      for (let channelIdx = 0; channelIdx < maxChannels; channelIdx++) {
-        for (const modelConfig of configuredModels) {
-          const channelOrder = determineChannelOrder(modelConfig.id, modelConfig, config);
-          
-          if (channelIdx >= channelOrder.length) continue;
-          
-          const channel = channelOrder[channelIdx];
-          const key = `${modelConfig.id}@${channel}`;
-          const targetModel = modelMap.get(key);
-          
-          if (!targetModel) continue;
-          if (!canTryAutoChannel(modelConfig.id, channel)) continue;
-          
-          debugLog(`[pi-router] Auto mode attempting ${key}...`);
-          const ok = await relayAutoAttempt(
-            "auto",
-            modelConfig,
-            channel,
-            targetModel,
-            "auto mode (modelFirst)",
-            config.sortBy || "manual",
-            context,
-            options,
-            config,
-            eventStream,
-            attemptedRoutes,
-            attemptedChannels
-          );
-          if (ok) return;
-        }
-      }
-
-      const failures = Array.from(routerState.lastFailures.values()).flat().slice(-Math.max(1, attemptedRoutes.length));
-      const errorMsg = [
-        `[pi-router] Auto router failed: all model-first routes were exhausted.`,
-        attemptedRoutes.length > 0 ? `Tried routes: ${attemptedRoutes.join(" → ")}` : "Tried routes: none",
-        failures.length > 0 ? "Recent failures:\n" + failures.map((f, i) => `  ${i + 1}. ${f.channel}: ${formatUserFacingFailure(f.error)}`).join("\n") : "Recent failures: none recorded",
-        "Run '/router explain' for detailed diagnostics.",
-      ].join("\n");
-      debugLog(errorMsg);
-      eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, errorMsg));
-      eventStream.end();
-    } catch (err) {
-      const error = getErrorMessage(err);
-      debugLog("[pi-router] Auto mode error:", err);
-      eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, formatUserFacingFailure(error)));
-      eventStream.end();
-    }
-  })();
-  
-  return eventStream;
-}
-
-/**
  * Route request through configured channels with failover
  */
 function routeRequest(
@@ -3325,8 +3191,7 @@ function routeRequest(
   context: Context,
   options: SimpleStreamOptions | undefined,
   config: RouterConfig,
-  modelMap: Map<string, PiModel>,
-  _pi: any
+  modelMap: Map<string, PiModel>
 ): AssistantMessageEventStream {
   const modelId = routerModel.id;
   
@@ -3937,7 +3802,6 @@ function createFailoverStream(
           config,
           modelConfig,
           modelMap,
-          null,
           eventStream
         );
         return;
@@ -4072,10 +3936,11 @@ async function tryModelFallback(
   config: RouterConfig,
   modelConfig: RouterModelConfig,
   modelMap: Map<string, PiModel>,
-  _pi: any,
   eventStream: AssistantMessageEventStream
 ): Promise<void> {
   const fallbackModels = modelConfig.fallbackModels || [];
+  const attemptedFallbackRoutes: string[] = [];
+  const fallbackFailures: Array<{ route: string; error: string }> = [];
 
   if (fallbackModels.length === 0) {
     // No fallback configured - show detailed error to user
@@ -4112,16 +3977,24 @@ async function tryModelFallback(
   for (const fallbackSpec of fallbackModels) {
     debugLog(`[pi-router] Attempting fallback to ${fallbackSpec.id}...`);
     
-    // Find the fallback model
     const fallbackChannels = fallbackSpec.channels;
-    let fallbackStream: AssistantMessageEventStream | null = null;
+    const fallbackModelConfig: RouterModelConfig = {
+      id: fallbackSpec.id,
+      channels: fallbackChannels,
+      sortBy: modelConfig.sortBy,
+      failover: modelConfig.failover,
+      sticky: false,
+      contextTransfer: modelConfig.contextTransfer,
+    };
     
     for (const channel of fallbackChannels) {
       const key = `${fallbackSpec.id}@${channel}`;
+      attemptedFallbackRoutes.push(key);
       const targetModel = modelMap.get(key);
       
       if (!targetModel) {
         debugLog(`[pi-router] Fallback model not found: ${key}`);
+        fallbackFailures.push({ route: key, error: "model not found" });
         continue;
       }
       
@@ -4130,7 +4003,9 @@ async function tryModelFallback(
       const primaryModel = modelMap.get(primaryKey);
       
       if (!primaryModel) {
-        debugLog(`[pi-router] Primary model not found for context transfer: ${primaryKey}`);
+        const error = `Primary model not found for context transfer: ${primaryKey}`;
+        debugLog(`[pi-router] ${error}`);
+        fallbackFailures.push({ route: key, error });
         continue;
       }
       
@@ -4153,7 +4028,6 @@ async function tryModelFallback(
             "full"
           );
         } else {
-          // Generate summary only when needed
           debugLog(`[pi-router] Generating context summary for model switch...`);
           const summaryModel = resolveSummaryModel(config.summaryModel, modelMap, targetModel);
           const summaryResult = await generateContextSummary(
@@ -4163,10 +4037,10 @@ async function tryModelFallback(
             summaryModel,
             config.summaryPrompt || DEFAULT_SUMMARY_PROMPT,
             config.summaryMaxTokens || 2000,
-            _pi
+            config,
           );
           
-          if (summaryResult.success && summaryResult.summary) {
+          if (summaryResult.summary) {
             modifiedContext = sanitizeContextForSwitch(
               context,
               primaryModel,
@@ -4174,7 +4048,11 @@ async function tryModelFallback(
               transferStrategy,
               summaryResult.summary
             );
-            debugLog(`[pi-router] Context summary generated (${summaryResult.tokensUsed || 0} tokens)`);
+            if (summaryResult.success) {
+              debugLog(`[pi-router] Context summary generated (${summaryResult.tokensUsed || 0} tokens)`);
+            } else {
+              debugLog("[pi-router] AI summary unavailable, using fallback summary text");
+            }
           } else {
             debugLog(`[pi-router] Summary generation failed, using full context`);
             modifiedContext = sanitizeContextForSwitch(
@@ -4194,31 +4072,69 @@ async function tryModelFallback(
         );
       }
       
-      // Try to forward to fallback model
-      try {
-        debugLog(`[pi-router] Forwarding to fallback ${key}...`);
-        updateFooterStatus(modelId, channel, fallbackSpec.id, "fallback");
-        fallbackStream = forwardToProvider(targetModel, modifiedContext, options, config);
-        
-        // Forward events; provider-level failures are emitted as error events,
-        // not thrown exceptions, so convert them back into a failed attempt.
-        for await (const event of fallbackStream) {
-          const failure = getStreamEventFailure(event);
-          if (failure) {
-            throw new Error(failure);
+      debugLog(`[pi-router] Forwarding to fallback ${key}...`);
+      updateFooterStatus(modelId, channel, fallbackSpec.id, "fallback", [...attemptedFallbackRoutes]);
+      logDecision({
+        timestamp: Date.now(),
+        modelId,
+        selectedChannel: key,
+        attemptedChannels: [...attemptedFallbackRoutes],
+        sortStrategy: "fallback",
+        fallbackUsed: true,
+        fallbackModel: fallbackSpec.id,
+        reason: `fallback after primary channels exhausted for ${modelId}`,
+      });
+
+      const streamStartTime = Date.now();
+      const fallbackStream = forwardToProvider(targetModel, modifiedContext, options, config);
+      const relayResult = await relayProviderStream(
+        fallbackStream,
+        eventStream,
+        options,
+        config,
+        () => {
+          const latency = Date.now() - streamStartTime;
+          recordLatency(fallbackSpec.id, channel, latency);
+          updateHealthStatus(fallbackSpec.id, channel, true);
+          recordCircuitOutcome(fallbackSpec.id, channel, true);
+          routerState.activeChannels.set(modelId, channel);
+          updateFooterStatus(modelId, channel, fallbackSpec.id, "success", [...attemptedFallbackRoutes]);
+
+          const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
+          if (lastDecision?.modelId === modelId && lastDecision.selectedChannel === key) {
+            lastDecision.latencyMs = latency;
           }
-          eventStream.push(event);
         }
-        
+      );
+
+      if (relayResult.ok) {
         eventStream.end();
         debugLog(`[pi-router] Successfully failed over to ${key}`);
         return;
-      } catch (err) {
-        const error = err instanceof Error ? err.message : String(err);
-        debugLog(`[pi-router] Fallback failed on ${key}:`, err);
-        updateFooterStatus(modelId, channel, fallbackSpec.id, "failed", undefined, error);
-        // Continue to next channel/model
       }
+
+      const { error, aborted, committed } = relayResult as Extract<RelayProviderStreamResult, { ok: false }>;
+      fallbackFailures.push({ route: key, error });
+      debugLog(`[pi-router] Fallback failed on ${key}:`, error);
+
+      if (aborted) {
+        updateFooterStatus(modelId, channel, fallbackSpec.id, "aborted", [...attemptedFallbackRoutes], error);
+        eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, error, "aborted"));
+        eventStream.end();
+        return;
+      }
+
+      if (committed) {
+        updateFooterStatus(modelId, channel, fallbackSpec.id, "failed", [...attemptedFallbackRoutes], error);
+        eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, formatUserFacingFailure(error)));
+        eventStream.end();
+        return;
+      }
+
+      recordFailure(fallbackSpec.id, channel, error, config, fallbackModelConfig);
+      updateHealthStatus(fallbackSpec.id, channel, false);
+      recordCircuitOutcome(fallbackSpec.id, channel, false);
+      updateFooterStatus(modelId, channel, fallbackSpec.id, "failed", [...attemptedFallbackRoutes], error);
     }
   }
 
@@ -4250,6 +4166,7 @@ async function tryModelFallback(
     `[pi-router] All channels and fallback models failed for ${modelId}.`,
     `Configured channels: ${modelConfig.channels.join(", ")}`,
     recentFailures.length > 0 ? "Recent failures:\n" + recentFailures.map((f, i) => `  ${i + 1}. ${f.channel}: ${formatUserFacingFailure(f.error)}`).join("\n") : "Recent failures: none recorded",
+    fallbackFailures.length > 0 ? "Fallback failures:\n" + fallbackFailures.map((f, i) => `  ${i + 1}. ${f.route}: ${formatUserFacingFailure(f.error)}`).join("\n") : "Fallback failures: none recorded",
     `Fallback models: ${modelConfig.fallbackModels?.map(f => f.id).join(", ") || "none"}`,
     "Run '/router explain' for detailed diagnostics.",
   ].join("\n");
@@ -4857,6 +4774,67 @@ function __testResetInternalState(): void {
   circuitBreaker.circuits.clear();
   healthProber.lastProbe.clear();
   decisionLogger.decisions.length = 0;
+  fileHashCache.clear();
+  providerIdsCache = null;
+  modelsCache = null;
+  modelsCacheTimestamp = 0;
+  modelsCacheModelsMtime = null;
+  modelsCacheAuthMtime = null;
+  cachedModelMap = null;
+  cachedModelMapTimestamp = 0;
+  cachedModelMapRegistryRef = null;
+  cachedModelMapModelsMtime = null;
+  cachedModelMapAuthMtime = null;
+  configFileMtimeMs = null;
+  currentRouterConfig = null;
+  autoSyncChecked = false;
+  autoSyncConfig = null;
+  piConfigDirOverride = null;
+  if (stickyPersistTimer) {
+    clearTimeout(stickyPersistTimer);
+    stickyPersistTimer = null;
+  }
+}
+
+function __testSetPiConfigDir(configDir: string | null): void {
+  piConfigDirOverride = configDir;
+  providerIdsCache = null;
+  modelsCache = null;
+  modelsCacheTimestamp = 0;
+  modelsCacheModelsMtime = null;
+  modelsCacheAuthMtime = null;
+  cachedModelMap = null;
+  cachedModelMapTimestamp = 0;
+  cachedModelMapRegistryRef = null;
+  cachedModelMapModelsMtime = null;
+  cachedModelMapAuthMtime = null;
+  fileHashCache.clear();
+  configFileMtimeMs = null;
+  currentRouterConfig = null;
+  autoSyncChecked = false;
+  autoSyncConfig = null;
+}
+
+function __testLoadModelsJson(): PiModel[] {
+  return loadModelsJson();
+}
+
+function __testLoadConfig(): RouterConfig {
+  const config = loadConfig();
+  configFileMtimeMs = getFileMtimeMs(getRouterConfigPath());
+  return setCurrentRouterConfig(config);
+}
+
+function __testRefreshConfigFromDisk(): RouterConfig {
+  return refreshConfigFromDisk();
+}
+
+function __testGetCachedModelMap(modelRegistry?: any): Map<string, PiModel> {
+  return getCachedModelMap(modelRegistry);
+}
+
+function __testCalculateFileHash(filePath: string): string {
+  return calculateFileHash(filePath);
 }
 
 function __testGetInternalState() {
@@ -4904,5 +4882,11 @@ export {
   buildModelMap,
   __testResetInternalState,
   __testGetInternalState,
+  __testSetPiConfigDir,
+  __testLoadModelsJson,
+  __testLoadConfig,
+  __testRefreshConfigFromDisk,
+  __testGetCachedModelMap,
+  __testCalculateFileHash,
 };
 

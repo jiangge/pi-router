@@ -51,7 +51,7 @@ See [CODE_REVIEW_FIXES.md](./CODE_REVIEW_FIXES.md) for detailed analysis of all 
 - **custom strategy** (renamed from modelFirst): Fully customizable order for all model@channel pairs
   - Uses `customOrder` array in config file for explicit ordering
   - Config wizard provides flat list editor for drag-and-drop reordering
-  - Initial order generated using "modelFirst" logic (all models' channel[0], then all models' channel[1], etc.)
+  - Initial order generated from the discovered model/channel list and then saved explicitly in `customOrder`
 - **Persistent sticky routing**: Remember the last successful model@channel across restarts
   - On success: update sticky record (debounced 5s file write)
   - On failure: clear sticky, fall back to normal strategy
@@ -72,7 +72,7 @@ See [CODE_REVIEW_FIXES.md](./CODE_REVIEW_FIXES.md) for detailed analysis of all 
 
 #### Interactive Menus and Tab Completion
 - **Interactive main menu**: `/router` without args opens SelectList with all subcommands
-- **Interactive config submenu**: `/router config` without args opens wizard/show/reset menu
+- **Interactive config submenu**: `/router config` without args opens wizard/order/show/reset menu
 - **Two-level tab completion**: First level (9 subcommands), second level (config sub-commands)
 - **Trailing space detection**: Proper handling of `"config "` vs `"config"` for tab trigger
 
@@ -100,15 +100,16 @@ See [CODE_REVIEW_FIXES.md](./CODE_REVIEW_FIXES.md) for detailed analysis of all 
   - Tab to switch between models
 - **Configuration commands**:
   - `/router config wizard` (or `/router config w`) - Run setup wizard
+  - `/router config order` (or `/router config o`) - Adjust existing model/channel order
   - `/router config show` (or `/router config s`) - Display current configuration
   - `/router config reset` (or `/router config r`) - Reset to defaults
-- **Shortcut support**: Type command prefixes (w, s, r) for quick access
+- **Shortcut support**: Type command prefixes (w, o, s, r) for quick access
 - **Auto-discovery**: Automatically find multi-channel models from models.json
 - **Smart defaults**: Intelligent default values for advanced settings
 
 #### Configuration Features
 - Wizard steps:
-  1. Routing strategy (channelFirst / modelFirst)
+  1. Routing strategy (channelFirst / custom)
   2. Sort strategy (latency / capabilityFirst / cost / manual)
   3. Auto-sync (enable / disable)
   4. Health probe (10min interval / disabled)

@@ -474,4 +474,89 @@ describe('request and event helpers', () => {
     expect(state.lastStatusUpdate?.channel).toBe('good');
     expect(state.lastStatusUpdate?.attemptedChannels).toEqual(['bad', 'good']);
   });
+
+  it('does not leak uncommitted fallback events before trying the next fallback', async () => {
+    registerApiProvider({
+      api: 'pi-router-fallback-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model) => {
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          const message = {
+            role: 'assistant',
+            content: [{ type: 'text', text: model.provider === 'fb2' ? 'ok' : '' }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: model.provider === 'fb2' ? 1 : 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: model.provider === 'fb2' ? 1 : 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: model.provider === 'fb2' ? 'stop' : 'error',
+            timestamp: Date.now(),
+          } as any;
+
+          if (model.provider === 'primary') {
+            stream.push({
+              type: 'error',
+              reason: 'error',
+              error: { ...message, errorMessage: 'primary failed' },
+            } as any);
+            return;
+          }
+
+          if (model.provider === 'fb1') {
+            stream.push({ type: 'start', partial: message } as any);
+            stream.push({ type: 'text_start', contentIndex: 0, partial: message } as any);
+            stream.push({
+              type: 'error',
+              reason: 'error',
+              error: { ...message, errorMessage: 'fallback failed before content' },
+            } as any);
+            return;
+          }
+
+          stream.push({ type: 'start', partial: message } as any);
+          stream.push({ type: 'text_start', contentIndex: 0, partial: message } as any);
+          stream.push({ type: 'text_delta', contentIndex: 0, delta: 'ok', partial: message } as any);
+          stream.push({ type: 'text_end', contentIndex: 0, content: 'ok', partial: message } as any);
+          stream.push({ type: 'done', reason: 'stop', message } as any);
+        });
+        return stream;
+      },
+    } as any, 'pi-router-fallback-test');
+
+    const stream = createFailoverStream(
+      'm1',
+      ['primary'],
+      { messages: [] } as any,
+      undefined,
+      { contextTransfer: 'full' } as any,
+      {
+        id: 'm1',
+        channels: ['primary'],
+        fallbackModels: [
+          { id: 'fb', channels: ['fb1'] },
+          { id: 'fb', channels: ['fb2'] },
+        ],
+      } as any,
+      new Map([
+        ['m1@primary', { id: 'm1', name: 'm1', provider: 'primary', api: 'pi-router-fallback-test-api' }],
+        ['fb@fb1', { id: 'fb', name: 'fb', provider: 'fb1', api: 'pi-router-fallback-test-api' }],
+        ['fb@fb2', { id: 'fb', name: 'fb', provider: 'fb2', api: 'pi-router-fallback-test-api' }],
+      ]) as any,
+    );
+
+    const events: any[] = [];
+    for await (const event of stream) {
+      events.push(event);
+    }
+
+    expect(events.some(e => e.partial?.provider === 'fb1')).toBe(false);
+    expect(events.some(e => e.type === 'text_delta' && e.delta === 'ok' && e.partial?.provider === 'fb2')).toBe(true);
+  });
 });

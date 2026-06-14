@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { FlatOrderEditor } from '../config-wizard-flat.js';
 import { buildEditableModelsFromConfig, hasExistingRouterModelConfig } from '../config-wizard-flow.js';
+import { TwoTierOrderEditor } from '../config-wizard-two-tier.js';
+import { ChannelOrderEditor, createStepComponent } from '../config-wizard-ui.js';
 import { scanAndClassifyChannels, smartSortChannels } from '../config-wizard.js';
 
 describe('config wizard channel classification', () => {
@@ -61,6 +63,11 @@ describe('config wizard smart sorting', () => {
   });
 });
 
+const theme = {
+  fg: (_name: string, text: string) => text,
+  bold: (text: string) => text,
+};
+
 describe('config order adjustment helpers', () => {
   it('detects whether an existing router config can be reordered', () => {
     expect(hasExistingRouterModelConfig({ models: [{ id: 'm1', channels: ['a'] }] } as any)).toBe(true);
@@ -85,8 +92,9 @@ describe('config order adjustment helpers', () => {
     );
 
     expect(editable.map(model => model.id)).toEqual(['gpt-5.5', 'deepseek-v4-flash']);
-    expect(editable[0].channels.map(channel => channel.channel)).toEqual(['xiaojimao', 'pipi', 'wong']);
+    expect(editable[0].channels.map(channel => channel.channel)).toEqual(['xiaojimao', 'pipi', 'openai', 'wong']);
     expect(editable[0].channels[0].reason).toBe('Third-party platform');
+    expect(editable[0].channels[2].reason).toBe('Configured channel (currently unavailable)');
     expect(editable[1].channels[0].reason).toBe('Official API');
   });
 
@@ -116,5 +124,78 @@ describe('config order adjustment helpers', () => {
       'gpt-5.5@xiaojimao',
       'gpt-5.5@pipi',
     ]);
+  });
+
+  it('supports basic two-tier editor completion and preserves configured order', () => {
+    const editor = new TwoTierOrderEditor(
+      [
+        {
+          id: 'gpt-5.5',
+          channels: [
+            { channel: 'xiaojimao', score: 50, reason: '第三方平台', category: 'aggregator' },
+            { channel: 'pipi', score: 50, reason: '第三方平台', category: 'aggregator' },
+          ],
+        },
+      ],
+      theme,
+    );
+
+    let completed = false;
+    editor.onComplete = () => {
+      completed = true;
+    };
+
+    editor.handleInput('c');
+    expect(completed).toBe(true);
+    expect(editor.render(80).join('\n')).toContain('Step 6/6');
+    expect(editor.getResult()).toEqual([{ id: 'gpt-5.5', channels: ['xiaojimao', 'pipi'] }]);
+  });
+
+  it('supports basic channel order editor completion', () => {
+    const editor = new ChannelOrderEditor(
+      [
+        {
+          id: 'gpt-5.5',
+          channels: [
+            { channel: 'xiaojimao', score: 50, reason: '第三方平台', category: 'aggregator' },
+            { channel: 'pipi', score: 50, reason: '第三方平台', category: 'aggregator' },
+          ],
+        },
+      ],
+      theme,
+    );
+
+    let completed = false;
+    editor.onComplete = () => {
+      completed = true;
+    };
+
+    editor.handleInput('c');
+    expect(completed).toBe(true);
+    expect(editor.render(80).join('\n')).toContain('Adjust Channel Order');
+    expect(editor.getResult()).toEqual([{ id: 'gpt-5.5', channels: ['xiaojimao', 'pipi'] }]);
+  });
+
+  it('builds reusable step components with select and cancel hooks', () => {
+    const selected: string[] = [];
+    let cancelled = false;
+    const { container, selectList } = createStepComponent(
+      1,
+      6,
+      'Choose Routing Strategy',
+      [{ value: 'channelFirst', label: 'channelFirst', description: 'Try channels first' }],
+      theme,
+      (value) => selected.push(value),
+      () => {
+        cancelled = true;
+      },
+    );
+
+    selectList.onSelect?.({ value: 'channelFirst' } as any);
+    selectList.onCancel?.();
+
+    expect(selected).toEqual(['channelFirst']);
+    expect(cancelled).toBe(true);
+    expect(container.render(80).join('\n')).toContain('Choose Routing Strategy');
   });
 });

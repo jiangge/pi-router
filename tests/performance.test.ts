@@ -1,119 +1,114 @@
 /**
- * Performance test for startup optimization
- * Tests file hash caching and model loading optimization
+ * Performance and cache regression tests.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import {
+  __testCalculateFileHash,
+  __testGetCachedModelMap,
+  __testLoadConfig,
+  __testLoadModelsJson,
+  __testRefreshConfigFromDisk,
+  __testResetInternalState,
+  __testSetPiConfigDir,
+} from '../index.js';
 
 describe('Performance Optimizations', () => {
   let testDir: string;
   let testFile: string;
 
   beforeEach(() => {
+    __testResetInternalState();
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-router-perf-'));
     testFile = path.join(testDir, 'test.json');
     fs.writeFileSync(testFile, JSON.stringify({ test: 'data' }), 'utf-8');
+    __testSetPiConfigDir(testDir);
   });
 
   afterEach(() => {
+    __testResetInternalState();
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
 
-  it('should cache file hash based on mtime', () => {
-    // Simulate the hash cache implementation
-    const fileHashCache = new Map<string, { hash: string; mtime: number }>();
-    
-    const calculateFileHash = (filePath: string): string => {
-      if (!fs.existsSync(filePath)) return '';
-      
-      const stats = fs.statSync(filePath);
-      const mtime = stats.mtimeMs;
-      
-      // Check cache
-      const cached = fileHashCache.get(filePath);
-      if (cached && cached.mtime === mtime) {
-        return cached.hash;
-      }
-      
-      // Calculate hash (simplified for test)
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const hash = `hash-${content.length}`;
-      
-      // Update cache
-      fileHashCache.set(filePath, { hash, mtime });
-      return hash;
-    };
+  function writeModelsJson(modelId: string, provider = 'Provider-A') {
+    fs.writeFileSync(
+      path.join(testDir, 'models.json'),
+      JSON.stringify({
+        providers: {
+          [provider]: {
+            models: [
+              {
+                id: modelId,
+                name: modelId,
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+        },
+      }),
+      'utf-8',
+    );
+  }
 
-    // First call - should calculate
-    const hash1 = calculateFileHash(testFile);
-    expect(hash1).toBe('hash-15'); // {"test":"data"} without trailing newline
-    expect(fileHashCache.size).toBe(1);
-
-    // Second call - should use cache (file unchanged)
-    const hash2 = calculateFileHash(testFile);
+  it('caches file hash by mtime and recalculates when the file changes', () => {
+    const hash1 = __testCalculateFileHash(testFile);
+    const hash2 = __testCalculateFileHash(testFile);
     expect(hash2).toBe(hash1);
-    expect(fileHashCache.size).toBe(1);
 
-    // Modify file and force a distinct mtime for filesystems with coarse timestamp resolution
     fs.writeFileSync(testFile, JSON.stringify({ test: 'modified' }), 'utf-8');
     const future = new Date(Date.now() + 2000);
     fs.utimesSync(testFile, future, future);
-    
-    // Third call - should recalculate (mtime changed)
-    const hash3 = calculateFileHash(testFile);
-    expect(hash3).toBe('hash-19'); // {"test":"modified"} without trailing newline
+
+    const hash3 = __testCalculateFileHash(testFile);
     expect(hash3).not.toBe(hash1);
-    expect(fileHashCache.size).toBe(1);
   });
 
-  it('should avoid redundant model loading', () => {
-    // Simulate lazy loading logic
-    let loadCount = 0;
-    let currentModels: any = undefined;
+  it('reloads models.json immediately when its mtime changes', () => {
+    writeModelsJson('m1');
+    expect(__testLoadModelsJson().map(model => model.id)).toEqual(['m1']);
 
-    const loadModelsJson = () => {
-      loadCount++;
-      return [{ id: 'test-model', name: 'Test' }];
-    };
+    writeModelsJson('m2');
+    const future = new Date(Date.now() + 2000);
+    fs.utimesSync(path.join(testDir, 'models.json'), future, future);
 
-    const config = {
-      models: [{ id: 'test-model', channels: ['ch1', 'ch2'] }],
-      autoSync: false,
-      lastSyncHash: undefined
-    };
-
-    const hasConfiguredModels = config.models && config.models.length > 0;
-
-    // Optimized logic: load once if we have configured models
-    const needsModelData = (
-      (config.autoSync !== false && config.lastSyncHash) ||
-      (!config.models || config.models.length === 0) ||
-      hasConfiguredModels
-    );
-
-    if (needsModelData) {
-      currentModels = loadModelsJson();
-    }
-
-    // Should have loaded once
-    expect(loadCount).toBe(1);
-    expect(currentModels).toBeDefined();
-
-    // Second check - should not load again
-    if (!currentModels) {
-      currentModels = loadModelsJson();
-    }
-
-    // Should still be 1 (no redundant load)
-    expect(loadCount).toBe(1);
+    expect(__testLoadModelsJson().map(model => model.id)).toEqual(['m2']);
   });
 
-  it('should defer health probes to avoid blocking startup', () => {
+  it('rebuilds cached model map when models.json changes', () => {
+    writeModelsJson('m1');
+    expect(Array.from(__testGetCachedModelMap().keys())).toEqual(['m1@Provider-A']);
+
+    writeModelsJson('m2');
+    const future = new Date(Date.now() + 2000);
+    fs.utimesSync(path.join(testDir, 'models.json'), future, future);
+
+    expect(Array.from(__testGetCachedModelMap().keys())).toEqual(['m2@Provider-A']);
+  });
+
+  it('refreshes router config from disk into the active config reference', () => {
+    const configPath = path.join(testDir, 'pi-router.json');
+    fs.writeFileSync(configPath, JSON.stringify({ strategy: 'channelFirst', models: [{ id: 'm1', channels: ['a'] }] }), 'utf-8');
+
+    expect(__testLoadConfig().models?.[0]?.channels).toEqual(['a']);
+
+    fs.writeFileSync(configPath, JSON.stringify({ strategy: 'custom', customOrder: ['m1@b'], models: [{ id: 'm1', channels: ['b'] }] }), 'utf-8');
+    const future = new Date(Date.now() + 2000);
+    fs.utimesSync(configPath, future, future);
+
+    const refreshed = __testRefreshConfigFromDisk();
+    expect(refreshed.strategy).toBe('custom');
+    expect(refreshed.models?.[0]?.channels).toEqual(['b']);
+    expect(refreshed.customOrder).toEqual(['m1@b']);
+  });
+
+  it('defers health probes to avoid blocking startup', () => {
     let probesStarted = false;
     let initializationComplete = false;
 
@@ -125,72 +120,28 @@ describe('Performance Optimizations', () => {
       healthProbe: { enabled: true }
     };
 
-    // Simulate initialization
     const initialize = () => {
-      // ... other initialization ...
-      
-      // Defer health probes
       if (config.healthProbe?.enabled) {
         setTimeout(() => {
           startHealthProbes();
-          
-          // Verify probes started after initialization
           expect(initializationComplete).toBe(true);
           expect(probesStarted).toBe(true);
-        }, 10); // Use 10ms for test (1000ms in production)
+        }, 10);
       }
-      
-      // Initialization completes immediately
+
       initializationComplete = true;
     };
 
     initialize();
 
-    // At this point, initialization is complete but probes haven't started
     expect(initializationComplete).toBe(true);
     expect(probesStarted).toBe(false);
 
-    // Wait for the deferred probe to start
     return new Promise<void>((resolve) => {
       setTimeout(() => {
         expect(probesStarted).toBe(true);
         resolve();
       }, 20);
     });
-  });
-
-  it('should skip hash calculation when autoSync is disabled', () => {
-    let hashCalculations = 0;
-
-    const calculateFileHash = (filePath: string): string => {
-      hashCalculations++;
-      return 'hash-value';
-    };
-
-    const config1 = {
-      autoSync: false,
-      lastSyncHash: undefined,
-      models: [{ id: 'test', channels: ['ch1'] }]
-    };
-
-    // With autoSync disabled, should not calculate hash
-    if (config1.autoSync !== false && config1.lastSyncHash) {
-      calculateFileHash(testFile);
-    }
-
-    expect(hashCalculations).toBe(0);
-
-    const config2 = {
-      autoSync: true,
-      lastSyncHash: 'old-hash',
-      models: [{ id: 'test', channels: ['ch1'] }]
-    };
-
-    // With autoSync enabled, should calculate hash
-    if (config2.autoSync !== false && config2.lastSyncHash) {
-      calculateFileHash(testFile);
-    }
-
-    expect(hashCalculations).toBe(1);
   });
 });

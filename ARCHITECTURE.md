@@ -210,7 +210,7 @@ Handles cross-model failover:
 
 ---
 
-## Context Transfer (L2 Fallback)
+## Context Transfer (Fallback Model Switch)
 
 When switching models, handle incompatibilities:
 

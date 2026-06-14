@@ -51,7 +51,7 @@ function toEditableChannelScore(
   return {
     channel,
     score: 50,
-    reason: classification?.reason || "已配置通道",
+    reason: classification?.reason || "Configured channel (currently unavailable)",
     category: classification?.category || "aggregator",
   };
 }
@@ -79,12 +79,10 @@ export function buildEditableModelsFromConfig(
     .map((configModel) => {
       const discoveredChannels = discoveredChannelsByModel.get(configModel.id) || [];
 
-      // FIX #5, #11: Use Set for O(1) lookup instead of O(n) .includes()
-      const discoveredSet = new Set(discoveredChannels);
-      const configuredChannels = configModel.channels.filter((channel) => discoveredSet.has(channel));
-
-      // FIX #5: Keep configured models even if no channels are currently discovered
-      // This preserves user's configuration when providers are temporarily unavailable
+      // Preserve the user's configured order even when a provider is temporarily
+      // unavailable from the current registry scan. Newly discovered channels are
+      // appended after the saved order.
+      const configuredChannels = configModel.channels.filter((channel) => channel !== "router" && channel !== "pi-router");
       const configuredSet = new Set(configuredChannels);
       const newlyDiscoveredChannels = discoveredChannels.filter((channel) => !configuredSet.has(channel));
 

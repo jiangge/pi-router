@@ -58,7 +58,7 @@ Recommended: run the interactive wizard.
 
 The wizard walks through:
 
-1. Routing strategy (`channelFirst` / `modelFirst`)
+1. Routing strategy (`channelFirst` / `custom`)
 2. Sort strategy (`latency` / `capabilityFirst` / `cost` / `manual`)
 3. Auto-sync (`enable` / `disable`)
 4. Health probe (`10 minutes` / `disabled`)
@@ -124,6 +124,7 @@ Run `/router` without arguments to open an interactive menu, or use tab completi
 
 ```text
 /router config wizard    # Interactive configuration wizard
+/router config order     # Adjust existing model/channel order only
 /router config show      # Show current configuration
 /router config reset     # Reset to default configuration
 ```
@@ -132,6 +133,7 @@ Shortcuts:
 
 ```text
 /router config w         # = wizard
+/router config o         # = order
 /router config s         # = show
 /router config r         # = reset
 ```
@@ -179,7 +181,7 @@ Try sticky first         Follow strategy order
 Clear sticky, fall back to strategy order
     ↓
 channelFirst: Model-A[ch1,ch2,ch3] → Model-B[ch1,ch2] → ...
-modelFirst:   [Model-A@ch1, Model-B@ch1] → [Model-A@ch2, Model-B@ch2] → ...
+custom:       explicit model@channel order from customOrder
     ↓
 On success: update sticky record, stream response
     ↓
