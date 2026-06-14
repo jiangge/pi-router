@@ -83,11 +83,14 @@ Maximum-effort code review completed on 2026-06-14. All 15 confirmed bugs have b
 **Fix:**
 - Changed `debugLog` to `console.warn` to surface error to user
 - Added available builtin models list to debug output
-- Makes configuration errors visible during wizard
+- **Update 2026-06-14:** Only warn when provider HAS builtin models but ID is wrong
+- OAuth providers (like kiro) have no builtin models, so missing is expected - use debugLog
+- Makes configuration errors visible during wizard without false positives
 
 **Files changed:**
-- `index.ts:380-382`: Changed debugLog to console.warn with helpful message
-- `index.ts:395-397`: Same fix for modelOverrides-only path
+- `index.ts:437-448`: Changed debugLog to console.warn with conditional logic
+- `index.ts:470-481`: Same fix for modelOverrides-only path
+- `index.ts`: Only warn if `builtinModels.length > 0` to avoid false positives for OAuth providers
 
 ---
 
