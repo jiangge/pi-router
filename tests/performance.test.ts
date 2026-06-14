@@ -82,6 +82,52 @@ describe('Performance Optimizations', () => {
     expect(__testLoadModelsJson().map(model => model.id)).toEqual(['m2']);
   });
 
+  it('adds auth-only builtin providers when they are absent from models.json', () => {
+    fs.writeFileSync(
+      path.join(testDir, 'auth.json'),
+      JSON.stringify({ 'openai-codex': { type: 'oauth' } }),
+      'utf-8',
+    );
+    writeModelsJson('m1', 'Provider-A');
+
+    const providers = __testLoadModelsJson().map(model => model.provider);
+
+    expect(providers).toContain('Provider-A');
+    expect(providers).toContain('openai-codex');
+  });
+
+  it('does not re-add an explicitly disabled provider from auth.json', () => {
+    fs.writeFileSync(
+      path.join(testDir, 'auth.json'),
+      JSON.stringify({ 'openai-codex': { type: 'oauth' } }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'models.json'),
+      JSON.stringify({
+        providers: {
+          'openai-codex': { models: [] },
+          'Provider-A': {
+            models: [
+              {
+                id: 'm1',
+                name: 'm1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    const providers = __testLoadModelsJson().map(model => model.provider);
+
+    expect(providers).toEqual(['Provider-A']);
+  });
+
   it('rebuilds cached model map when models.json changes', () => {
     writeModelsJson('m1');
     expect(Array.from(__testGetCachedModelMap().keys())).toEqual(['m1@Provider-A']);

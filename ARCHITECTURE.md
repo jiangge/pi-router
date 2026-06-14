@@ -435,17 +435,21 @@ Preview differences between config and `models.json`
 
 ## Testing Strategy
 
-### Unit Tests (TODO)
-- `determineChannelOrder()` logic
-- Circuit breaker state transitions
-- Latency averaging
-- Context sanitization
+### Unit Tests
+- ✅ `determineChannelOrder()` logic
+- ✅ Circuit breaker state transitions
+- ✅ Latency averaging
+- ✅ Context sanitization
+- ✅ Config wizard classification/sorting/editors
+- ✅ Provider/model expansion and config persistence
 
-### Integration Tests (TODO)
-- Full L1 failover flow
-- fallback model fallback with summary
-- Circuit breaker opening/closing
-- Cooldown expiration
+### Integration Tests
+- ✅ Full L1 failover flow
+- ✅ fallback model fallback with summary
+- ✅ Circuit breaker opening/closing
+- ✅ Cooldown skip/expiration
+- ✅ Stream commit safety (do not fail over after committed output)
+- ✅ Config wizard keyboard-driven flow
 
 ### Manual Testing
 1. Configure router with multiple channels

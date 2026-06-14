@@ -419,7 +419,11 @@ function expandProviderModels(providerName: string, provider: any): PiModel[] {
     // FIX #13: If models array is explicitly set (even if empty), don't use builtin fallback
     // This allows users to disable a provider by setting models:[]
     for (const model of provider.models) {
-      const merged = mergeModelProps({ headers: model.headers, compat: model.compat }, { headers: provider.headers, compat: provider.compat });
+      const merged = mergeModelProps(
+        {},
+        { headers: provider.headers, compat: provider.compat },
+        { headers: model.headers, compat: model.compat }
+      );
 
       expanded.push(normalizeModelForProvider({
         ...model,
@@ -709,6 +713,7 @@ function loadModelsJson(): PiModel[] {
     
     const allModels: PiModel[] = [];
     
+    const configuredProviderNames = new Set(Object.keys(data.providers));
     for (const [providerName, providerData] of Object.entries(data.providers)) {
       const provider = providerData as any;
       allModels.push(...expandProviderModels(providerName, provider));
@@ -716,7 +721,10 @@ function loadModelsJson(): PiModel[] {
 
     const { authProviders } = loadProviderIds();
     for (const providerName of authProviders) {
-      if (allModels.some(model => model.provider === providerName)) {
+      // Auth-only discovery should only fill in providers absent from models.json.
+      // If a provider is explicitly present with models: [], that is an intentional
+      // user-level disable and must not be undone by auth.json.
+      if (configuredProviderNames.has(providerName) || allModels.some(model => model.provider === providerName)) {
         continue;
       }
       allModels.push(...expandProviderModels(providerName, {}));
@@ -4911,6 +4919,7 @@ export {
   isAbortError,
   createMirrorModels,
   createFailoverStream,
+  determineChannelOrder,
   expandProviderModels,
   modelsFromRegistry,
   filterConfigurableModels,

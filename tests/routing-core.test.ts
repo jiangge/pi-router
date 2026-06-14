@@ -8,6 +8,7 @@ import {
   createFailoverStream,
   createMirrorModels,
   detectModelChanges,
+  determineChannelOrder,
   expandProviderModels,
   estimateContextTokens,
   filterConfigurableModels,
@@ -187,6 +188,46 @@ describe('routing core helpers', () => {
 });
 
 describe('routing state helpers', () => {
+  it('moves the last successful sticky channel to the front of configured order', () => {
+    const state = __testGetInternalState();
+    state.activeChannels.set('m1', 'Provider-B');
+
+    expect(determineChannelOrder(
+      'm1',
+      { id: 'm1', channels: ['Provider-A', 'Provider-B', 'Provider-C'] } as any,
+      { sticky: true } as any,
+    )).toEqual(['Provider-B', 'Provider-A', 'Provider-C']);
+
+    expect(determineChannelOrder(
+      'm1',
+      { id: 'm1', channels: ['Provider-A', 'Provider-B'], sticky: false } as any,
+      { sticky: true } as any,
+    )).toEqual(['Provider-A', 'Provider-B']);
+
+    expect(determineChannelOrder(
+      'm1',
+      { id: 'm1', channels: ['Provider-A', 'Provider-B'] } as any,
+      { sticky: false } as any,
+    )).toEqual(['Provider-A', 'Provider-B']);
+  });
+
+  it('sorts channel order by latency and cost when configured', () => {
+    recordLatency('m1', 'Provider-A', 200);
+    recordLatency('m1', 'Provider-B', 50);
+
+    expect(determineChannelOrder(
+      'm1',
+      { id: 'm1', channels: ['Provider-A', 'Provider-B'], sortBy: 'latency' } as any,
+      {} as any,
+    )).toEqual(['Provider-B', 'Provider-A']);
+
+    expect(determineChannelOrder(
+      'claude-opus-4-8',
+      { id: 'claude-opus-4-8', channels: ['anthropic', 'local'], sortBy: 'cost' } as any,
+      {} as any,
+    )).toEqual(['local', 'anthropic']);
+  });
+
   it('records cooldowns on failure', () => {
     recordFailure(
       'm1',
@@ -288,6 +329,37 @@ describe('routing state helpers', () => {
 });
 
 describe('provider registration helpers', () => {
+  it('uses the first configured available channel for mirror defaults', () => {
+    const mirrors = createMirrorModels(
+      [
+        { id: 'm1', channels: ['primary', 'secondary'] },
+      ] as any,
+      new Map([
+        ['m1@primary', { id: 'm1', name: 'Primary', provider: 'primary', api: 'api-a', reasoning: true, input: ['text'], contextWindow: 100, maxTokens: 10, compat: { a: true }, thinkingLevelMap: { low: 'low' } }],
+        ['m1@secondary', { id: 'm1', name: 'Secondary', provider: 'secondary', api: 'api-b', reasoning: false, input: ['text'], contextWindow: 999, maxTokens: 999 }],
+      ]) as any,
+    );
+
+    const auto = mirrors.find((model: any) => model.id === 'auto');
+    const mirror = mirrors.find((model: any) => model.id === 'm1');
+
+    expect(auto).toMatchObject({
+      api: 'pi-router',
+      reasoning: true,
+      contextWindow: 100,
+      maxTokens: 10,
+      compat: { a: true },
+      thinkingLevelMap: { low: 'low' },
+    });
+    expect(mirror).toMatchObject({
+      name: 'Primary (router)',
+      api: 'pi-router',
+      reasoning: true,
+      contextWindow: 100,
+      maxTokens: 10,
+    });
+  });
+
   it('creates router mirror models with custom api dispatch', () => {
     const mirrors = createMirrorModels(
       [
@@ -301,6 +373,53 @@ describe('provider registration helpers', () => {
 
     expect(mirrors.map((m: any) => m.id)).toEqual(['auto', 'm1']);
     expect(mirrors.every((m: any) => m.api === 'pi-router')).toBe(true);
+  });
+
+  it('lets explicit provider models override provider-level headers and compat', () => {
+    const models = expandProviderModels('custom-provider', {
+      api: 'custom-api',
+      baseUrl: 'https://provider.example/v1',
+      headers: {
+        'x-shared': 'provider',
+        'x-provider-only': 'provider-only',
+      },
+      compat: {
+        stream: 'provider',
+        providerOnly: true,
+      },
+      models: [
+        {
+          id: 'm1',
+          name: 'Model One',
+          headers: {
+            'x-shared': 'model',
+            'x-model-only': 'model-only',
+          },
+          compat: {
+            stream: 'model',
+            modelOnly: true,
+          },
+        },
+      ],
+    });
+
+    expect(models).toHaveLength(1);
+    expect(models[0]).toMatchObject({
+      id: 'm1',
+      provider: 'custom-provider',
+      api: 'custom-api',
+      baseUrl: 'https://provider.example/v1',
+      headers: {
+        'x-shared': 'model',
+        'x-provider-only': 'provider-only',
+        'x-model-only': 'model-only',
+      },
+      compat: {
+        stream: 'model',
+        providerOnly: true,
+        modelOnly: true,
+      },
+    });
   });
 
   it('expands modelOverrides-based providers such as openai-codex', () => {
@@ -367,6 +486,37 @@ describe('request and event helpers', () => {
       maxRetries: 2,
       timeoutMs: 123,
     });
+  });
+
+  it('caps inherited maxTokens and preserves explicit router request overrides', () => {
+    expect(applyRouterRequestOptions({ maxTokens: 999999 }, {} as any)?.maxTokens).toBe(32768);
+
+    const configured = applyRouterRequestOptions(
+      { maxTokens: 999999, timeoutMs: 10 },
+      { request: { maxTokens: 456, timeoutMs: 0, maxRetryDelayMs: 789 } } as any,
+    );
+
+    expect(configured).toMatchObject({
+      maxRetries: 0,
+      maxTokens: 456,
+      maxRetryDelayMs: 789,
+    });
+    expect(configured?.timeoutMs).toBeUndefined();
+  });
+
+  it('uses a short cooldown for fast connection failures', () => {
+    recordFailure(
+      'm1',
+      'Provider-A',
+      'ECONNREFUSED connection error',
+      { failover: { cooldownMs: 60000 } } as any,
+      { id: 'm1', channels: ['Provider-A'], failover: { cooldownMs: 60000 } } as any,
+    );
+
+    const cooldown = __testGetInternalState().cooldowns.get('m1@Provider-A') ?? 0;
+    const remainingMs = cooldown - Date.now();
+    expect(remainingMs).toBeGreaterThan(0);
+    expect(remainingMs).toBeLessThanOrEqual(5000);
   });
 
   it('extracts provider error events for failover', () => {
@@ -473,6 +623,278 @@ describe('request and event helpers', () => {
     expect(state.failures.get('m1')?.[0].channel).toBe('bad');
     expect(state.lastStatusUpdate?.channel).toBe('good');
     expect(state.lastStatusUpdate?.attemptedChannels).toEqual(['bad', 'good']);
+  });
+
+  it('summarizes exhausted channels with user-facing diagnostics', async () => {
+    registerApiProvider({
+      api: 'pi-router-exhausted-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model) => {
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          const message = {
+            role: 'assistant',
+            content: [],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: 'error',
+            errorMessage: model.provider === 'auth' ? '401 invalid token' : '429 rate limit exceeded',
+            timestamp: Date.now(),
+          } as any;
+          stream.push({ type: 'error', reason: 'error', error: message } as any);
+          stream.end();
+        });
+        return stream;
+      },
+    } as any, 'pi-router-exhausted-test');
+
+    const stream = createFailoverStream(
+      'm1',
+      ['auth', 'quota'],
+      { messages: [] } as any,
+      undefined,
+      {} as any,
+      { id: 'm1', channels: ['auth', 'quota'] } as any,
+      new Map([
+        ['m1@auth', { id: 'm1', name: 'm1', provider: 'auth', api: 'pi-router-exhausted-test-api' }],
+        ['m1@quota', { id: 'm1', name: 'm1', provider: 'quota', api: 'pi-router-exhausted-test-api' }],
+      ]) as any,
+    );
+
+    const events: any[] = [];
+    for await (const event of stream) {
+      events.push(event);
+    }
+
+    const errorMessage = events.find(e => e.type === 'error')?.error?.errorMessage;
+    expect(errorMessage).toContain('All channels failed for m1');
+    expect(errorMessage).toContain('auth: 认证失败（401/token 无效）');
+    expect(errorMessage).toContain('quota: 触发限流（429）');
+    expect(errorMessage).toContain('Configure fallback models');
+  });
+
+  it('does not fail over after a provider has committed response content', async () => {
+    registerApiProvider({
+      api: 'pi-router-committed-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model) => {
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          const message = {
+            role: 'assistant',
+            content: [{ type: 'text', text: model.provider === 'good' ? 'good' : 'partial' }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 1,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: model.provider === 'good' ? 'stop' : 'error',
+            timestamp: Date.now(),
+          } as any;
+
+          if (model.provider === 'bad') {
+            stream.push({ type: 'start', partial: message } as any);
+            stream.push({ type: 'text_delta', contentIndex: 0, delta: 'partial', partial: message } as any);
+            stream.push({ type: 'error', reason: 'error', error: { ...message, errorMessage: '500 after partial output' } } as any);
+            stream.end();
+            return;
+          }
+
+          stream.push({ type: 'text_delta', contentIndex: 0, delta: 'good', partial: message } as any);
+          stream.push({ type: 'done', reason: 'stop', message } as any);
+          stream.end();
+        });
+        return stream;
+      },
+    } as any, 'pi-router-committed-test');
+
+    const stream = createFailoverStream(
+      'm1',
+      ['bad', 'good'],
+      { messages: [] } as any,
+      undefined,
+      {} as any,
+      { id: 'm1', channels: ['bad', 'good'] } as any,
+      new Map([
+        ['m1@bad', { id: 'm1', name: 'm1', provider: 'bad', api: 'pi-router-committed-test-api' }],
+        ['m1@good', { id: 'm1', name: 'm1', provider: 'good', api: 'pi-router-committed-test-api' }],
+      ]) as any,
+    );
+
+    const events: any[] = [];
+    for await (const event of stream) {
+      events.push(event);
+    }
+
+    expect(events.some(e => e.type === 'text_delta' && e.delta === 'partial')).toBe(true);
+    expect(events.some(e => e.type === 'text_delta' && e.delta === 'good')).toBe(false);
+    expect(events.at(-1)?.type).toBe('error');
+    expect(events.at(-1)?.error?.errorMessage).toBe('上游服务错误（500）');
+  });
+
+  it('skips channels in cooldown and retries them after cooldown expires', async () => {
+    const attemptedProviders: string[] = [];
+
+    registerApiProvider({
+      api: 'pi-router-cooldown-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model) => {
+        attemptedProviders.push(model.provider);
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          const message = {
+            role: 'assistant',
+            content: [{ type: 'text', text: model.provider }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 1,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: 'stop',
+            timestamp: Date.now(),
+          } as any;
+          stream.push({ type: 'text_delta', contentIndex: 0, delta: model.provider, partial: message } as any);
+          stream.push({ type: 'done', reason: 'stop', message } as any);
+          stream.end();
+        });
+        return stream;
+      },
+    } as any, 'pi-router-cooldown-test');
+
+    const modelMap = new Map([
+      ['m1@cold', { id: 'm1', name: 'm1', provider: 'cold', api: 'pi-router-cooldown-test-api' }],
+      ['m1@warm', { id: 'm1', name: 'm1', provider: 'warm', api: 'pi-router-cooldown-test-api' }],
+    ]) as any;
+
+    __testGetInternalState().cooldowns.set('m1@cold', Date.now() + 60_000);
+    const skippedStream = createFailoverStream(
+      'm1',
+      ['cold', 'warm'],
+      { messages: [] } as any,
+      undefined,
+      {} as any,
+      { id: 'm1', channels: ['cold', 'warm'] } as any,
+      modelMap,
+    );
+    for await (const _event of skippedStream) {
+      // drain stream
+    }
+    expect(attemptedProviders).toEqual(['warm']);
+
+    attemptedProviders.length = 0;
+    __testGetInternalState().cooldowns.set('m1@cold', Date.now() - 1);
+    const expiredStream = createFailoverStream(
+      'm1',
+      ['cold', 'warm'],
+      { messages: [] } as any,
+      undefined,
+      {} as any,
+      { id: 'm1', channels: ['cold', 'warm'] } as any,
+      modelMap,
+    );
+    for await (const _event of expiredStream) {
+      // drain stream
+    }
+    expect(attemptedProviders).toEqual(['cold']);
+  });
+
+  it('summarizes context before switching to a fallback model when needed', async () => {
+    const contextsByProvider = new Map<string, any>();
+
+    registerApiProvider({
+      api: 'pi-router-summary-fallback-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model, context) => {
+        contextsByProvider.set(model.provider, context);
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          const message = {
+            role: 'assistant',
+            content: [{ type: 'text', text: model.provider === 'sum' ? 'summarized context' : 'fallback ok' }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 1,
+              output: 2,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 3,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: model.provider === 'primary' ? 'error' : 'stop',
+            timestamp: Date.now(),
+          } as any;
+
+          if (model.provider === 'primary') {
+            stream.push({ type: 'error', reason: 'error', error: { ...message, errorMessage: 'primary failed' } } as any);
+            stream.end();
+            return;
+          }
+
+          if (model.provider === 'sum') {
+            stream.push({ type: 'text_delta', contentIndex: 0, delta: 'summarized context', partial: message } as any);
+            stream.push({ type: 'done', reason: 'stop', message } as any);
+            stream.end();
+            return;
+          }
+
+          stream.push({ type: 'text_delta', contentIndex: 0, delta: 'fallback ok', partial: message } as any);
+          stream.push({ type: 'done', reason: 'stop', message } as any);
+          stream.end();
+        });
+        return stream;
+      },
+    } as any, 'pi-router-summary-fallback-test');
+
+    const stream = createFailoverStream(
+      'm1',
+      ['primary'],
+      { messages: [{ role: 'user', content: 'long request '.repeat(200) }] } as any,
+      undefined,
+      { contextTransfer: 'summary', summaryModel: 'sum@sum', summaryMaxTokens: 50 } as any,
+      {
+        id: 'm1',
+        channels: ['primary'],
+        fallbackModels: [{ id: 'fb', channels: ['fb'] }],
+      } as any,
+      new Map([
+        ['m1@primary', { id: 'm1', name: 'm1', provider: 'primary', api: 'pi-router-summary-fallback-test-api', contextWindow: 100000 }],
+        ['fb@fb', { id: 'fb', name: 'fb', provider: 'fb', api: 'pi-router-summary-fallback-test-api', contextWindow: 1 }],
+        ['sum@sum', { id: 'sum', name: 'sum', provider: 'sum', api: 'pi-router-summary-fallback-test-api', contextWindow: 100000 }],
+      ]) as any,
+    );
+
+    const events: any[] = [];
+    for await (const event of stream) {
+      events.push(event);
+    }
+
+    expect(events.some(e => e.type === 'text_delta' && e.delta === 'fallback ok')).toBe(true);
+    expect(contextsByProvider.get('sum')?.messages?.[0]?.content).toContain('Conversation to summarize');
+    expect(contextsByProvider.get('sum')?.messages?.[0]?.content).toContain('long request');
+    expect(contextsByProvider.get('fb')?.messages).toEqual([{ role: 'user', content: 'summarized context' }]);
   });
 
   it('does not leak uncommitted fallback events before trying the next fallback', async () => {
