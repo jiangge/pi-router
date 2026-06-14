@@ -1,5 +1,5 @@
 /**
- * pi-router v0.3.1
+ * pi-router v0.3.2
  * Intelligent routing layer for pi coding agent
  *
  * Routes channels (same model, different providers) with optional fallback models.
@@ -1174,7 +1174,7 @@ async function showRouterMenu(ctx: any, config: RouterConfig): Promise<void> {
 
   const result = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: any) => {
     const container = new Container();
-    container.addChild(new Text(theme.fg("accent", theme.bold("\u2554 Pi-Router (v0.3.1)")), 1, 1));
+    container.addChild(new Text(theme.fg("accent", theme.bold("\u2554 Pi-Router (v0.3.2)")), 1, 1));
     container.addChild(new Text(theme.fg("dim", "\u2500".repeat(40)), 1, 0));
 
     const selectList = new SelectList(items, items.length, {
@@ -1678,7 +1678,7 @@ export default function (pi: ExtensionAPI) {
     }, 1000);
   }
   
-  debugLog("[pi-router] Extension loaded (v0.3.1)");
+  debugLog("[pi-router] Extension loaded (v0.3.2)");
   debugLog("[pi-router] Strategy:", config.strategy ?? "channelFirst");
   debugLog("[pi-router] Configured models:", config.models?.length ?? 0);
   
@@ -2260,7 +2260,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     ctx.ui.notify(lines.join("\n"), "info");
   } else {
     ctx.ui.notify(
-      "pi-router v0.3.1\n\n" +
+      "pi-router v0.3.2\n\n" +
       "Commands:\n" +
       "  /router config    - Configuration management\n" +
       "  /router status    - Show router status\n" +

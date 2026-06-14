@@ -5,6 +5,18 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-06-14
+
+### Fixed
+
+- **Explicit model precedence**: `provider.models` entries now correctly override provider-level `headers` and `compat` defaults instead of being overwritten by them during model expansion.
+- **Explicit provider disable**: Providers declared in `models.json` with `models: []` now stay disabled even when the same provider appears in `auth.json`.
+
+### Tests
+
+- Expanded router regression coverage to 64 passing tests.
+- Added behavior tests for config wizard keyboard flows, ordering editors, channel ordering, cooldown/failover behavior, fallback summary transfer, and committed-stream failover safety.
+
 ## [0.3.1] - 2026-06-14
 
 ### Fixed
