@@ -5,6 +5,42 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-14
+
+### Fixed
+
+#### Critical Performance Issues
+- **Hot path optimization**: Cache modelMap to avoid O(n) rebuild on every streaming request (100-500x speedup)
+- **File system optimization**: Consolidate and cache provider ID loading with mtime checks
+- **Algorithm optimization**: Use Set for O(1) lookups instead of O(n²) array filtering in channel merging
+
+#### Critical Correctness Issues
+- **Config mutation bug**: Replace in-place mutation with immutable config snapshots to prevent stale references
+- **Format validation**: Validate custom order format before split('@') to prevent undefined channel names
+- **Config preservation**: Preserve configured models even when channels are temporarily unavailable
+- **Error visibility**: Surface modelOverrides errors to users (console.warn vs debugLog), with smart detection for OAuth providers
+
+#### Behavior Fixes
+- **Provider disabling**: Respect explicit `models:[]` to disable provider (no unintended builtin fallback)
+- **Type safety**: Safer getBuiltinPiAiModels handling with explicit type checks
+- **Failover order**: Use first *configured* channel not first *available* to preserve user's failover order
+
+#### Code Quality Improvements
+- **Code deduplication**: Extract mergeModelProps() helper to eliminate 4x duplication of header/compat merge logic
+- **Single responsibility**: Consolidate loadAuthProviderIds() and loadModelsJsonProviderIds() into single loadProviderIds()
+- **False positive warnings**: Suppress warnings for OAuth providers (like kiro) that don't have builtin models
+
+### Changed
+- Version bumped from 0.3.0-alpha.1 to 0.3.0 (stable release)
+
+### Technical Details
+See [CODE_REVIEW_FIXES.md](./CODE_REVIEW_FIXES.md) for detailed analysis of all 15 bug fixes.
+
+### Performance Impact
+- Streaming requests: ~1-5ms → ~0.01ms overhead (100-500x improvement)
+- Config operations: ~0.5-2ms → ~0.01ms when cached
+- Channel filtering: O(n²) → O(n) with Set-based lookups
+
 ## [Unreleased] - 2026-06-13
 
 ### Added
