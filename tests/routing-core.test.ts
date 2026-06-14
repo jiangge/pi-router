@@ -1,12 +1,21 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createAssistantMessageEventStream, registerApiProvider } from '@earendil-works/pi-ai';
+import { visibleWidth } from '@earendil-works/pi-tui';
 import {
   __testGetInternalState,
   __testResetInternalState,
   canAttemptChannel,
+  createFailoverStream,
+  createMirrorModels,
   detectModelChanges,
   estimateContextTokens,
   estimateRequestCost,
+  applyRouterRequestOptions,
+  formatFooterStatus,
+  formatRightAlignedStatusLine,
   generateSimpleTextSummary,
+  getStreamEventFailure,
+  isAbortError,
   shouldSummarizeForTarget,
   getAverageLatency,
   getChannelPricing,
@@ -18,6 +27,7 @@ import {
   sanitizeContextForSwitch,
   sortChannelsByCost,
   sortChannelsByLatency,
+  updateFooterStatus,
   updateHealthStatus,
 } from '../index.js';
 
@@ -240,5 +250,168 @@ describe('routing state helpers', () => {
     recordCircuitOutcome('m1', 'Provider-A', true);
     expect(circuit.state).toBe('closed');
     expect(circuit.failureCount).toBe(0);
+  });
+
+  it('stores footer phase and renders attempted chain', () => {
+    updateFooterStatus('claude-fable-5', 'lan', undefined, 'trying', ['lan']);
+    updateFooterStatus('claude-fable-5', 'n1-claude', undefined, 'success', ['lan', 'n1-claude']);
+
+    const state = __testGetInternalState();
+    expect(state.lastStatusUpdate?.phase).toBe('success');
+    expect(state.lastStatusUpdate?.attemptedChannels).toEqual(['lan', 'n1-claude']);
+
+    const rendered = formatFooterStatus(
+      { fg: (_name: string, text: string) => text },
+      state.lastStatusUpdate as any,
+    );
+    expect(rendered).toContain('(router) claude-fable-5 → n1-claude');
+    expect(rendered).not.toContain('[lan → n1-claude]');
+  });
+
+  it('right-aligns router status against other footer statuses', () => {
+    const rendered = formatRightAlignedStatusLine(
+      { fg: (_name: string, text: string) => text },
+      80,
+      'Claude cache 0/1 · 0M/0M tok',
+      '(router) claude-fable-5 → failed pipi-cc [lan → n1-claude → pipi-cc]',
+    );
+
+    expect(rendered).toBeTruthy();
+    expect(visibleWidth(rendered!)).toBeLessThanOrEqual(80);
+    expect(rendered).toMatch(/ {2,}\(router\)/);
+    expect(rendered).toContain('Claude');
+  });
+});
+
+describe('provider registration helpers', () => {
+  it('creates router mirror models with custom api dispatch', () => {
+    const mirrors = createMirrorModels(
+      [
+        { id: 'm1', channels: ['bad', 'good'] },
+      ] as any,
+      new Map([
+        ['m1@bad', { id: 'm1', name: 'Model One', provider: 'bad', api: 'anthropic-messages', reasoning: true, input: ['text'], contextWindow: 100, maxTokens: 10 }],
+        ['m1@good', { id: 'm1', name: 'Model One', provider: 'good', api: 'anthropic-messages', reasoning: true, input: ['text'], contextWindow: 100, maxTokens: 10 }],
+      ]) as any,
+    );
+
+    expect(mirrors.map((m: any) => m.id)).toEqual(['auto', 'm1']);
+    expect(mirrors.every((m: any) => m.api === 'pi-router')).toBe(true);
+  });
+});
+
+describe('request and event helpers', () => {
+  it('defaults provider retries to zero so router failover owns retries', () => {
+    expect(applyRouterRequestOptions({ maxRetries: 5 }, {} as any)?.maxRetries).toBe(0);
+    expect(applyRouterRequestOptions(undefined, { request: { maxRetries: 2, timeoutMs: 123 } } as any)).toMatchObject({
+      maxRetries: 2,
+      timeoutMs: 123,
+    });
+  });
+
+  it('extracts provider error events for failover', () => {
+    const error = getStreamEventFailure({
+      type: 'error',
+      reason: 'error',
+      error: {
+        errorMessage: 'Connection error.',
+      },
+    } as any);
+
+    expect(error).toBe('Connection error.');
+    expect(getStreamEventFailure({ type: 'text_delta', delta: 'ok' } as any)).toBeUndefined();
+  });
+
+  it('recognizes abort errors so user cancellation does not pollute health', () => {
+    expect(isAbortError('Request was aborted')).toBe(true);
+    expect(isAbortError('AbortError: The operation was aborted')).toBe(true);
+    expect(isAbortError('Connection error.')).toBe(false);
+  });
+
+  it('fails over when provider emits an error event instead of throwing', async () => {
+    registerApiProvider({
+      api: 'pi-router-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model) => {
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          if (model.provider === 'bad') {
+            stream.push({
+              type: 'error',
+              reason: 'error',
+              error: {
+                role: 'assistant',
+                content: [],
+                api: model.api,
+                provider: model.provider,
+                model: model.id,
+                usage: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  totalTokens: 0,
+                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+                },
+                stopReason: 'error',
+                errorMessage: 'Connection error.',
+                timestamp: Date.now(),
+              },
+            } as any);
+            return;
+          }
+
+          const message = {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'ok' }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 1,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: 'stop',
+            timestamp: Date.now(),
+          } as any;
+
+          stream.push({ type: 'start', partial: message } as any);
+          stream.push({ type: 'text_start', contentIndex: 0, partial: message } as any);
+          stream.push({ type: 'text_delta', contentIndex: 0, delta: 'ok', partial: message } as any);
+          stream.push({ type: 'text_end', contentIndex: 0, content: 'ok', partial: message } as any);
+          stream.push({ type: 'done', reason: 'stop', message } as any);
+        });
+        return stream;
+      },
+    } as any, 'pi-router-test');
+
+    const stream = createFailoverStream(
+      'm1',
+      ['bad', 'good'],
+      { messages: [] } as any,
+      undefined,
+      {} as any,
+      { id: 'm1', channels: ['bad', 'good'] } as any,
+      new Map([
+        ['m1@bad', { id: 'm1', name: 'm1', provider: 'bad', api: 'pi-router-test-api' }],
+        ['m1@good', { id: 'm1', name: 'm1', provider: 'good', api: 'pi-router-test-api' }],
+      ]) as any,
+    );
+
+    const events: any[] = [];
+    for await (const event of stream) {
+      events.push(event);
+    }
+
+    expect(events.some(e => e.type === 'text_delta' && e.delta === 'ok')).toBe(true);
+
+    const state = __testGetInternalState();
+    expect(state.failures.get('m1')?.[0].channel).toBe('bad');
+    expect(state.lastStatusUpdate?.channel).toBe('good');
+    expect(state.lastStatusUpdate?.attemptedChannels).toEqual(['bad', 'good']);
   });
 });

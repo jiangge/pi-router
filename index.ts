@@ -7,9 +7,9 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, SelectList, Text, type SelectItem } from "@earendil-works/pi-tui";
+import { Container, SelectList, Text, truncateToWidth, visibleWidth, type SelectItem } from "@earendil-works/pi-tui";
 import { streamSimple, createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { Model, Api, Context, SimpleStreamOptions, AssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { Model, Api, Context, SimpleStreamOptions, AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -17,6 +17,10 @@ import * as crypto from "crypto";
 import { runConfigWizard } from "./config-wizard-flow.js";
 
 const PI_ROUTER_DEBUG = process.env.PI_ROUTER_DEBUG === "1";
+const ROUTER_API = "pi-router" as Api;
+const ROUTER_DUMMY_API_KEY = "router";
+const DEFAULT_ROUTER_TIMEOUT_MS = Number(process.env.PI_ROUTER_TIMEOUT_MS || 120000);
+const DEFAULT_ROUTER_MAX_TOKENS = Number(process.env.PI_ROUTER_MAX_TOKENS || 32768);
 
 function debugLog(...args: unknown[]): void {
   if (PI_ROUTER_DEBUG) {
@@ -30,6 +34,7 @@ type PiModel = {
   provider: string;
   api: string;
   baseUrl?: string;
+  headers?: Record<string, string>;
   compat?: Record<string, unknown>;
   reasoning?: boolean;
   thinkingLevelMap?: Record<string, string>;
@@ -43,6 +48,12 @@ type RouterConfig = {
   strategy?: "channelFirst" | "custom";
   auto?: boolean;
   sortBy?: "manual" | "capabilityFirst" | "costFirst" | "latency" | "cost";
+  request?: {
+    timeoutMs?: number;
+    maxRetries?: number;
+    maxRetryDelayMs?: number;
+    maxTokens?: number;
+  };
   models?: RouterModelConfig[];
   customOrder?: string[];  // For custom strategy: array of "modelId@channel" strings
   failover?: {
@@ -64,6 +75,12 @@ type RouterConfig = {
     intervalMs?: number;
     timeoutMs?: number;
     probeMessage?: string;
+  };
+  footer?: {
+    /** Keep route status on the built-in third status line. */
+    statusLine?: boolean;
+    /** Replace pi's built-in footer and right-align route status on the model line. */
+    rightAlignRoute?: boolean;
   };
 };
 
@@ -282,6 +299,13 @@ function getModelsJsonPath(): string {
   return path.join(getPiConfigDir(), "models.json");
 }
 
+function normalizeModelForProvider(model: PiModel): PiModel {
+  return {
+    ...model,
+    maxTokens: Math.min(model.maxTokens || DEFAULT_ROUTER_MAX_TOKENS, DEFAULT_ROUTER_MAX_TOKENS),
+  };
+}
+
 /**
  * Get pi-router config path
  */
@@ -393,12 +417,21 @@ function loadModelsJson(): PiModel[] {
       }
       
       for (const model of provider.models) {
-        allModels.push({
+        const headers = provider.headers || model.headers
+          ? { ...(provider.headers || {}), ...(model.headers || {}) }
+          : undefined;
+        const compat = provider.compat || model.compat
+          ? { ...(provider.compat || {}), ...(model.compat || {}) }
+          : undefined;
+
+        allModels.push(normalizeModelForProvider({
           ...model,
           provider: providerName,
-          api: provider.api || model.api || "unknown",
-          baseUrl: provider.baseUrl || model.baseUrl,
-        });
+          api: model.api || provider.api || "unknown",
+          baseUrl: model.baseUrl || provider.baseUrl,
+          headers,
+          compat,
+        }));
       }
     }
     
@@ -877,15 +910,320 @@ async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
 }
 
 /**
- * Update footer status to show the active channel (real provider)
+ * Update footer status to show the active channel (real provider).
+ *
+ * This writes to the active UI immediately when available. Relying only on
+ * turn_start misses mid-turn route changes and can leave the footer blank until
+ * the next user turn.
  */
-function updateFooterStatus(modelId: string, channel: string, actualModelId?: string): void {
+function updateFooterStatus(
+  modelId: string,
+  channel: string,
+  actualModelId?: string,
+  phase: RouterStatusPhase = "trying",
+  attemptedChannels?: string[],
+  error?: string
+): void {
   routerState.lastStatusUpdate = {
     modelId,
     channel,
     actualModelId,
+    phase,
+    attemptedChannels,
+    error,
     timestamp: Date.now()
   };
+
+  applyFooterStatus();
+}
+
+function formatRouteStatus(theme: any, status: NonNullable<RouterState["lastStatusUpdate"]>): string {
+  const fg = (name: string, text: string) => theme?.fg ? theme.fg(name, text) : text;
+  const at = fg("accent", "@");
+  const channel = fg(status.phase === "failed" || status.phase === "aborted" ? "warning" : "success", status.channel);
+  const phase = status.phase === "trying"
+    ? fg("dim", "trying ")
+    : status.phase === "failed"
+      ? fg("warning", "failed ")
+      : status.phase === "aborted"
+        ? fg("warning", "aborted ")
+        : status.phase === "fallback"
+          ? fg("warning", "fallback ")
+          : "";
+
+  // Footer stays intentionally concise: only the current real model/channel.
+  // Full attempted chains remain available in /router debug-footer, /router
+  // decisions, and /router explain.
+  const target = status.actualModelId
+    ? `${status.actualModelId}${at}${channel}`
+    : channel;
+
+  return phase + target;
+}
+
+function formatFooterStatus(theme: any, status: NonNullable<RouterState["lastStatusUpdate"]>): string {
+  const fg = (name: string, text: string) => theme?.fg ? theme.fg(name, text) : text;
+  const arrow = fg("accent", "→");
+
+  return fg("dim", `(router) ${status.modelId} ${arrow} `) + formatRouteStatus(theme, status);
+}
+
+function formatTokens(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+  return `${Math.round(count / 1000000)}M`;
+}
+
+function formatCwdForRouterFooter(cwd: string, home: string | undefined): string {
+  if (!home) return cwd;
+  const resolvedCwd = path.resolve(cwd);
+  const resolvedHome = path.resolve(home);
+  const relativeToHome = path.relative(resolvedHome, resolvedCwd);
+  const isInsideHome = relativeToHome === "" ||
+    (relativeToHome !== ".." && !relativeToHome.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeToHome));
+  if (!isInsideHome) return cwd;
+  return relativeToHome === "" ? "~" : `~${path.sep}${relativeToHome}`;
+}
+
+function sanitizeFooterStatusText(text: string): string {
+  return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
+function formatStatsLine(theme: any, width: number): string {
+  const sessionManager = routerState.currentSessionManager;
+  const model = routerState.currentModel;
+  const getContextUsage = routerState.currentGetContextUsage;
+  const modelRegistry = routerState.currentModelRegistry;
+
+  let totalInput = 0;
+  let totalOutput = 0;
+  let totalCacheRead = 0;
+  let totalCacheWrite = 0;
+  let totalCost = 0;
+  let latestCacheHitRate: number | undefined;
+
+  for (const entry of sessionManager?.getEntries?.() ?? []) {
+    if (entry.type === "message" && entry.message?.role === "assistant") {
+      const usage = entry.message.usage;
+      if (!usage) continue;
+      totalInput += usage.input || 0;
+      totalOutput += usage.output || 0;
+      totalCacheRead += usage.cacheRead || 0;
+      totalCacheWrite += usage.cacheWrite || 0;
+      totalCost += usage.cost?.total || 0;
+      const latestPromptTokens = (usage.input || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
+      latestCacheHitRate = latestPromptTokens > 0 ? ((usage.cacheRead || 0) / latestPromptTokens) * 100 : undefined;
+    }
+  }
+
+  const contextUsage = getContextUsage?.();
+  const contextWindow = contextUsage?.contextWindow ?? model?.contextWindow ?? 0;
+  const contextPercentValue = contextUsage?.percent ?? 0;
+  const contextPercent = contextUsage?.percent !== null && contextUsage?.percent !== undefined
+    ? contextPercentValue.toFixed(1)
+    : "?";
+
+  const statsParts: string[] = [];
+  if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
+  if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
+  if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
+  if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
+  if ((totalCacheRead > 0 || totalCacheWrite > 0) && latestCacheHitRate !== undefined) {
+    statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+  }
+
+  const usingSubscription = model ? !!modelRegistry?.isUsingOAuth?.(model) : false;
+  if (totalCost || usingSubscription) {
+    statsParts.push(`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+  }
+
+  const contextDisplay = contextPercent === "?" ? `?/${formatTokens(contextWindow)}` : `${contextPercent}%/${formatTokens(contextWindow)}`;
+  if (contextPercentValue > 90) {
+    statsParts.push(theme?.fg ? theme.fg("error", contextDisplay) : contextDisplay);
+  } else if (contextPercentValue > 70) {
+    statsParts.push(theme?.fg ? theme.fg("warning", contextDisplay) : contextDisplay);
+  } else {
+    statsParts.push(contextDisplay);
+  }
+
+  let statsLeft = statsParts.join(" ");
+  if (visibleWidth(statsLeft) > width) {
+    statsLeft = truncateToWidth(statsLeft, width, "...");
+  }
+
+  return theme?.fg ? theme.fg("dim", statsLeft) : statsLeft;
+}
+
+function formatRightAlignedStatusLine(
+  theme: any,
+  width: number,
+  leftStatus: string,
+  rightStatus: string
+): string | undefined {
+  const left = sanitizeFooterStatusText(leftStatus);
+  const right = sanitizeFooterStatusText(rightStatus);
+
+  if (!left && !right) return undefined;
+  if (!right) return truncateToWidth(left, width, theme?.fg ? theme.fg("dim", "...") : "...");
+  if (!left) return " ".repeat(Math.max(0, width - visibleWidth(right))) + truncateToWidth(right, width, "");
+
+  const leftWidth = visibleWidth(left);
+  const minPadding = 2;
+
+  // Preserve left-side extension statuses (e.g. cache optimizer). Router status
+  // is secondary observability, so truncate it first when space is tight.
+  if (leftWidth >= width - minPadding) {
+    return truncateToWidth(left, width, theme?.fg ? theme.fg("dim", "...") : "...");
+  }
+
+  const availableForRight = width - leftWidth - minPadding;
+  const clippedRight = visibleWidth(right) > availableForRight
+    ? truncateToWidth(right, availableForRight, theme?.fg ? theme.fg("dim", "...") : "...")
+    : right;
+  const padding = " ".repeat(Math.max(minPadding, width - leftWidth - visibleWidth(clippedRight)));
+  return left + padding + clippedRight;
+}
+
+function createRouterFooterComponent(_tui: any, theme: any, footerData: any) {
+  const unsubscribe = footerData?.onBranchChange?.(() => _tui?.requestRender?.());
+
+  return {
+    dispose() {
+      unsubscribe?.();
+    },
+    invalidate() {},
+    render(width: number): string[] {
+      const sessionManager = routerState.currentSessionManager;
+      let pwd = formatCwdForRouterFooter(sessionManager?.getCwd?.() ?? process.cwd(), process.env.HOME || process.env.USERPROFILE);
+      const branch = footerData?.getGitBranch?.();
+      if (branch) pwd = `${pwd} (${branch})`;
+      const sessionName = sessionManager?.getSessionName?.();
+      if (sessionName) pwd = `${pwd} • ${sessionName}`;
+
+      const statsLeft = formatStatsLine(theme, width);
+      const status = routerState.lastStatusUpdate;
+      const model = routerState.currentModel;
+      const routeStatus = status && routerState.currentModelProvider === "router"
+        ? formatRouteStatus(theme, status)
+        : "";
+
+      let modelText = model?.id || "no-model";
+      if (model?.reasoning) {
+        const thinkingLevel = routerState.currentThinkingLevel || "off";
+        modelText = thinkingLevel === "off" ? `${modelText} • thinking off` : `${modelText} • ${thinkingLevel}`;
+      }
+      const modelPrefix = model?.provider ? `(${model.provider}) ${modelText}` : modelText;
+      const rightText = modelPrefix;
+      const rightWidth = visibleWidth(rightText);
+      const statsLeftWidth = visibleWidth(statsLeft);
+
+      let modelLine: string;
+      if (statsLeftWidth + 2 + rightWidth <= width) {
+        modelLine = statsLeft + " ".repeat(width - statsLeftWidth - rightWidth) + rightText;
+      } else {
+        const availableForRight = width - statsLeftWidth - 2;
+        if (availableForRight > 0) {
+          const truncatedRight = truncateToWidth(rightText, availableForRight, "");
+          modelLine = statsLeft + " ".repeat(Math.max(0, width - statsLeftWidth - visibleWidth(truncatedRight))) + truncatedRight;
+        } else {
+          modelLine = statsLeft;
+        }
+      }
+
+      const lines = [
+        truncateToWidth(theme?.fg ? theme.fg("dim", pwd) : pwd, width, theme?.fg ? theme.fg("dim", "...") : "..."),
+        truncateToWidth(modelLine, width, ""),
+      ];
+
+      const extensionStatuses = footerData?.getExtensionStatuses?.();
+      if (extensionStatuses?.size > 0) {
+        const statusEntries = Array.from(extensionStatuses.entries())
+          .sort(([a], [b]) => String(a).localeCompare(String(b)));
+        const leftStatuses = statusEntries
+          .filter(([key]) => key !== "pi-router" && key !== "pi-router-right")
+          .map(([, text]) => String(text))
+          .join(" ");
+        const rightAlignedRouterStatus = statusEntries.find(([key]) => key === "pi-router-right")?.[1];
+        const statusLine = formatRightAlignedStatusLine(
+          theme,
+          width,
+          leftStatuses,
+          rightAlignedRouterStatus ? String(rightAlignedRouterStatus) : ""
+        );
+        if (statusLine) {
+          lines.push(statusLine);
+        }
+      }
+
+      return lines;
+    },
+  };
+}
+
+function refreshFooterContext(ctx: any, thinkingLevel?: string): void {
+  routerState.currentUi = ctx.ui;
+  routerState.currentTheme = ctx.ui?.theme;
+  routerState.currentModel = ctx.model;
+  routerState.currentModelProvider = ctx.model?.provider;
+  routerState.currentThinkingLevel = thinkingLevel;
+  routerState.currentSessionManager = ctx.sessionManager;
+  routerState.currentGetContextUsage = typeof ctx.getContextUsage === "function" ? () => ctx.getContextUsage() : undefined;
+  routerState.currentModelRegistry = ctx.modelRegistry;
+}
+
+function ensureRouterFooterInstalled(): void {
+  const ui = routerState.currentUi;
+  if (!ui?.setFooter || routerState.customFooterInstalled || !routerState.customFooterEnabled) {
+    return;
+  }
+
+  ui.setFooter(createRouterFooterComponent);
+  routerState.customFooterInstalled = true;
+  ui.setStatus?.("pi-router", undefined);
+  ui.setStatus?.("pi-router-right", undefined);
+}
+
+function restoreDefaultFooter(): void {
+  const ui = routerState.currentUi;
+  if (!ui?.setFooter || !routerState.customFooterInstalled) {
+    return;
+  }
+
+  ui.setFooter(undefined);
+  routerState.customFooterInstalled = false;
+  ui.setStatus?.("pi-router-right", undefined);
+}
+
+function applyFooterStatus(): void {
+  const status = routerState.lastStatusUpdate;
+  const ui = routerState.currentUi;
+
+  if (!ui || !status || routerState.currentModelProvider !== "router") {
+    restoreDefaultFooter();
+    ui?.setStatus?.("pi-router", undefined);
+    ui?.setStatus?.("pi-router-right", undefined);
+    return;
+  }
+
+  // Be conservative: never install the replacement footer unless there is a
+  // concrete router status to show. This avoids clobbering other extension
+  // footer state during startup/reload.
+  if (!status) return;
+
+  ensureRouterFooterInstalled();
+
+  if (routerState.customFooterInstalled) {
+    ui.setStatus?.("pi-router", undefined);
+    ui.setStatus?.("pi-router-right", status ? formatFooterStatus(routerState.currentTheme, status) : undefined);
+    return;
+  }
+
+  if (ui.setStatus) {
+    ui.setStatus("pi-router", formatFooterStatus(routerState.currentTheme, status));
+    ui.setStatus("pi-router-right", undefined);
+  }
 }
 
 /**
@@ -974,36 +1312,53 @@ export default function (pi: ExtensionAPI) {
   debugLog("[pi-router] Strategy:", config.strategy ?? "channelFirst");
   debugLog("[pi-router] Configured models:", config.models?.length ?? 0);
   
-  // Listen to turn_start to update footer with active channel
+  // Do not replace pi's built-in footer by default. Other extensions (for
+  // example cache optimizers) may own a custom footer; pi-router should only
+  // add a short status item unless the user explicitly opts into replacement.
+  routerState.customFooterEnabled = config.footer?.rightAlignRoute !== false;
+  const updateFooterContext = (ctx: any) => {
+    refreshFooterContext(ctx, typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined);
+  };
+
+  // Remember the active UI context so routing code can update the footer during
+  // the same turn, not only at the next turn_start.
+  pi.on("session_start", async (_event, ctx) => {
+    updateFooterContext(ctx);
+    applyFooterStatus();
+  });
+
   pi.on("turn_start", async (_event, ctx) => {
-    const status = routerState.lastStatusUpdate;
-    if (status && ctx.model?.provider === "router") {
-      let statusText: string;
+    updateFooterContext(ctx);
+    applyFooterStatus();
+  });
 
-      if (status.actualModelId) {
-        // Auto router mode: show auto → actual-model @ channel
-        statusText = ctx.ui.theme.fg("dim", `auto ${ctx.ui.theme.fg("accent", "→")} ${status.actualModelId} ${ctx.ui.theme.fg("accent", "@")} `) +
-                     ctx.ui.theme.fg("success", status.channel);
-      } else {
-        // Regular router model: show (router) model → channel
-        statusText = ctx.ui.theme.fg("dim", `(router) ${status.modelId} ${ctx.ui.theme.fg("accent", "→")} `) +
-                     ctx.ui.theme.fg("success", status.channel);
-      }
+  pi.on("message_update", async (_event, ctx) => {
+    updateFooterContext(ctx);
+    applyFooterStatus();
+  });
 
-      ctx.ui.setStatus("pi-router", statusText);
-    }
+  pi.on("thinking_level_select", async (event, ctx) => {
+    refreshFooterContext(ctx, event.level);
+    applyFooterStatus();
   });
   
   // Clear status when switching away from router models
   pi.on("model_select", async (event, ctx) => {
+    updateFooterContext(ctx);
+    routerState.currentModel = event.model;
+    routerState.currentModelProvider = event.model.provider;
     if (event.model.provider !== "router") {
+      restoreDefaultFooter();
       ctx.ui.setStatus("pi-router", undefined);
+      ctx.ui.setStatus("pi-router-right", undefined);
+    } else {
+      applyFooterStatus();
     }
   });
   
   // Register /router command
   pi.registerCommand("router", {
-    description: "pi-router operations (config, status, list, explain, decisions, probes, pricing, sync, diff)",
+    description: "pi-router operations (config, status, list, explain, decisions, probes, pricing, sync, diff, debug-footer)",
     getArgumentCompletions: (prefix: string) => {
       // Handle trailing space: user typed "config " then hit tab
       const hasTrailingSpace = prefix.endsWith(' ');
@@ -1022,6 +1377,7 @@ export default function (pi: ExtensionAPI) {
           { value: "sync", label: "sync", description: "Check models.json changes" },
           { value: "diff", label: "diff", description: "Preview config differences" },
           { value: "sticky", label: "sticky", description: "View/clear sticky routing records" },
+          { value: "debug-footer", label: "debug-footer (df)", description: "Debug footer display status" },
         ];
         
         const lowerPrefix = (parts[0] || '').toLowerCase();
@@ -1475,6 +1831,53 @@ async function routerHandler(args: string, ctx: any, config: RouterConfig): Prom
         ctx.ui.notify(lines.join("\n"), "info");
       }
     }
+  } else if (subcommand === "debug-footer" || subcommand === "df") {
+    // Debug footer display status
+    const status = routerState.lastStatusUpdate;
+    const lines: string[] = ["Footer Debug Information", "━".repeat(40), ""];
+
+    // Router state
+    lines.push("Router State:");
+    if (status) {
+      lines.push(`  modelId: ${status.modelId}`);
+      lines.push(`  channel: ${status.channel}`);
+      lines.push(`  actualModelId: ${status.actualModelId || "(none)"}`);
+      lines.push(`  phase: ${status.phase}`);
+      lines.push(`  attemptedChannels: ${status.attemptedChannels?.join(" -> ") || "(none)"}`);
+      if (status.error) {
+        lines.push(`  error: ${status.error}`);
+      }
+      lines.push(`  timestamp: ${new Date(status.timestamp).toISOString()}`);
+    } else {
+      lines.push("  (no status recorded yet)");
+    }
+    lines.push("");
+
+    // Current context
+    lines.push("Current Context:");
+    lines.push(`  model.provider: ${ctx.model?.provider || "(none)"}`);
+    lines.push(`  model.id: ${ctx.model?.id || "(none)"}`);
+    lines.push("");
+
+    // Expected footer
+    if (status && ctx.model?.provider === "router") {
+      lines.push("Expected Footer:");
+      lines.push(`  ${formatFooterStatus({ fg: (_name: string, text: string) => text }, status)}`);
+      lines.push("");
+      lines.push("Status: ✓ Footer should be displayed");
+    } else {
+      lines.push("Expected Footer:");
+      lines.push("  (not displayed)");
+      lines.push("");
+      if (!status) {
+        lines.push("Status: ✗ No routing has occurred yet");
+      } else if (ctx.model?.provider !== "router") {
+        lines.push("Status: ✗ Current model is not a router model");
+        lines.push(`  Current provider: ${ctx.model?.provider}`);
+      }
+    }
+
+    ctx.ui.notify(lines.join("\n"), "info");
   } else {
     ctx.ui.notify(
       "pi-router v0.3.0-alpha\n\n" +
@@ -1604,7 +2007,7 @@ Provide the summary now:`;
       tokensUsed,
     };
   } catch (err) {
-    console.error("[pi-router] Failed to generate summary with summaryModel:", err);
+    debugLog("[pi-router] Failed to generate summary with summaryModel:", err);
 
     const isSameAsTarget = summaryModel.id === toModel.id && summaryModel.provider === toModel.provider;
     if (!isSameAsTarget) {
@@ -1616,7 +2019,7 @@ Provide the summary now:`;
         debugLog(`[pi-router] Summary generated with target model: ${targetModelResult.summary.length} chars`);
         return targetModelResult;
       } catch (fallbackErr) {
-        console.error("[pi-router] Target model also failed:", fallbackErr);
+        debugLog("[pi-router] Target model also failed:", fallbackErr);
       }
     }
 
@@ -1845,14 +2248,29 @@ ${summary}`;
 /**
  * Router state for tracking active channels and cooldowns
  */
+type RouterStatusPhase = "trying" | "success" | "failed" | "fallback" | "aborted";
+
 type RouterState = {
   activeChannels: Map<string, string>;  // modelId -> current active channel
   cooldowns: Map<string, number>;  // "modelId@channel" -> cooldown end timestamp
   lastFailures: Map<string, { channel: string; error: string; timestamp: number }[]>;  // modelId -> failure history
+  currentUi?: any;
+  currentTheme?: any;
+  currentModel?: any;
+  currentModelProvider?: string;
+  currentThinkingLevel?: string;
+  currentSessionManager?: any;
+  currentGetContextUsage?: (() => { tokens: number | null; contextWindow: number; percent: number | null } | undefined);
+  currentModelRegistry?: any;
+  customFooterInstalled?: boolean;
+  customFooterEnabled?: boolean;
   lastStatusUpdate?: {
     modelId: string;           // router model ID (e.g., "claude-fable-5" or "auto")
     channel: string;           // actual channel used (e.g., "lan")
     actualModelId?: string;    // actual model ID (only for auto mode)
+    phase: RouterStatusPhase;
+    attemptedChannels?: string[];
+    error?: string;
     timestamp: number;
   };  // last active routing info
 };
@@ -1863,29 +2281,10 @@ const routerState: RouterState = {
   lastFailures: new Map(),
 };
 
-/**
- * Register router provider with mirror entries for configured models
- */
-function registerRouterProvider(
-  pi: ExtensionAPI,
-  config: RouterConfig,
-  allModels: PiModel[]
-): void {
-  const configuredModels = config.models || [];
-  
-  if (configuredModels.length === 0) {
-    debugLog("[pi-router] No models configured, skipping provider registration");
-    return;
-  }
-  
-  // Build a map of all available models by id@provider
-  const modelMap = new Map<string, PiModel>();
-  for (const model of allModels) {
-    const key = `${model.id}@${model.provider}`;
-    modelMap.set(key, model);
-  }
-  
-  // Register router provider with all configured models
+function createMirrorModels(
+  configuredModels: RouterModelConfig[],
+  modelMap: Map<string, PiModel>
+): any[] {
   const mirrorModels: any[] = [];
   
   // Add the special "router" meta-model (auto mode)
@@ -1898,7 +2297,9 @@ function registerRouterProvider(
     mirrorModels.push({
       id: "auto",
       name: "Auto Router",
-      api: firstPrimaryModel.api,
+      // Must be the router provider API so pi-ai dispatches to pi-router's
+      // custom streamSimple handler. The real upstream API comes from modelMap.
+      api: ROUTER_API,
       reasoning: firstPrimaryModel.reasoning,
       input: firstPrimaryModel.input,
       contextWindow: firstPrimaryModel.contextWindow,
@@ -1924,7 +2325,9 @@ function registerRouterProvider(
     mirrorModels.push({
       id: configModel.id,
       name: `${primaryModel.name} (router)`,
-      api: primaryModel.api,
+      // Must be the router provider API so pi-ai dispatches to pi-router's
+      // custom streamSimple handler. The real upstream API comes from modelMap.
+      api: ROUTER_API,
       reasoning: primaryModel.reasoning,
       input: primaryModel.input,
       contextWindow: primaryModel.contextWindow,
@@ -1937,6 +2340,33 @@ function registerRouterProvider(
     debugLog(`[pi-router] Configured router/${configModel.id} with ${configModel.channels.length} channels`);
   }
   
+  return mirrorModels;
+}
+
+/**
+ * Register router provider with mirror entries for configured models
+ */
+function registerRouterProvider(
+  pi: ExtensionAPI,
+  config: RouterConfig,
+  allModels: PiModel[]
+): void {
+  const configuredModels = config.models || [];
+
+  if (configuredModels.length === 0) {
+    debugLog("[pi-router] No models configured, skipping provider registration");
+    return;
+  }
+
+  // Build a map of all available models by id@provider
+  const modelMap = new Map<string, PiModel>();
+  for (const model of allModels) {
+    const key = `${model.id}@${model.provider}`;
+    modelMap.set(key, model);
+  }
+
+  const mirrorModels = createMirrorModels(configuredModels, modelMap);
+
   if (mirrorModels.length === 0) {
     console.warn("[pi-router] No valid mirror models created");
     return;
@@ -1944,7 +2374,7 @@ function registerRouterProvider(
   
   // Register with custom streamSimple handler
   pi.registerProvider("router", {
-    api: "custom" as Api,  // Add required api field
+    api: ROUTER_API,
     baseUrl: "https://router.internal",  // Dummy URL for custom provider
     apiKey: "router",  // Dummy API key for custom provider
     models: mirrorModels,
@@ -2065,6 +2495,104 @@ function scheduleStickyPersist(config: RouterConfig): void {
   }, 5000);
 }
 
+async function relayAutoAttempt(
+  routerModelId: string,
+  modelConfig: RouterModelConfig,
+  channel: string,
+  targetModel: PiModel,
+  reason: string,
+  sortStrategy: string,
+  context: Context,
+  options: SimpleStreamOptions | undefined,
+  config: RouterConfig,
+  eventStream: AssistantMessageEventStream,
+  attemptedRoutes: string[],
+  attemptedChannels: string[]
+): Promise<boolean> {
+  const key = `${modelConfig.id}@${channel}`;
+  attemptedRoutes.push(key);
+  attemptedChannels.push(key);
+  updateFooterStatus(routerModelId, channel, modelConfig.id, "trying", [...attemptedChannels]);
+
+  let stream: AssistantMessageEventStream;
+  try {
+    stream = forwardToProvider(targetModel, context, options, config);
+  } catch (err) {
+    const error = getErrorMessage(err);
+    const aborted = isAbortError(error) || isAbortSignalAborted(options);
+    debugLog(`[pi-router] Auto mode failed to start ${key}:`, err);
+
+    if (aborted) {
+      updateFooterStatus(routerModelId, channel, modelConfig.id, "aborted", [...attemptedChannels], error);
+      eventStream.push(createRouterErrorEvent(routerModelId, "router", ROUTER_API, error, "aborted"));
+      eventStream.end();
+      return true;
+    }
+
+    recordFailure(modelConfig.id, channel, error, config, modelConfig);
+    updateHealthStatus(modelConfig.id, channel, false);
+    recordCircuitOutcome(modelConfig.id, channel, false);
+    updateFooterStatus(routerModelId, channel, modelConfig.id, "failed", [...attemptedChannels], error);
+    return false;
+  }
+
+  logDecision({
+    timestamp: Date.now(),
+    modelId: "auto (router)",
+    selectedChannel: key,
+    attemptedChannels: [...attemptedRoutes],
+    sortStrategy,
+    fallbackUsed: false,
+    reason,
+  });
+
+  const streamStartTime = Date.now();
+  const relayResult = await relayProviderStream(
+    stream,
+    eventStream,
+    options,
+    config,
+    () => {
+      const latency = Date.now() - streamStartTime;
+      recordLatency(modelConfig.id, channel, latency);
+      updateHealthStatus(modelConfig.id, channel, true);
+      recordCircuitOutcome(modelConfig.id, channel, true);
+      routerState.activeChannels.set(routerModelId, channel);
+      updateStickyRecord(routerModelId, modelConfig.id, channel, config);
+      updateFooterStatus(routerModelId, channel, modelConfig.id, "success", [...attemptedChannels]);
+    }
+  );
+
+  if (relayResult.ok) {
+    eventStream.end();
+    return true;
+  }
+
+  const failedRelayResult = relayResult as Extract<RelayProviderStreamResult, { ok: false }>;
+  const { error, aborted, committed } = failedRelayResult;
+  debugLog(`[pi-router] Auto mode failed on ${key}:`, error);
+
+  if (aborted) {
+    updateFooterStatus(routerModelId, channel, modelConfig.id, "aborted", [...attemptedChannels], error);
+    eventStream.push(createRouterErrorEvent(routerModelId, "router", ROUTER_API, error, "aborted"));
+    eventStream.end();
+    return true;
+  }
+
+  if (committed) {
+    updateFooterStatus(routerModelId, channel, modelConfig.id, "failed", [...attemptedChannels], error);
+    eventStream.push(createRouterErrorEvent(routerModelId, "router", ROUTER_API, formatUserFacingFailure(error)));
+    eventStream.end();
+    return true;
+  }
+
+  recordFailure(modelConfig.id, channel, error, config, modelConfig);
+  updateHealthStatus(modelConfig.id, channel, false);
+  recordCircuitOutcome(modelConfig.id, channel, false);
+  updateFooterStatus(routerModelId, channel, modelConfig.id, "failed", [...attemptedChannels], error);
+  return false;
+}
+
 /**
  * Auto mode with channelFirst strategy
  */
@@ -2077,6 +2605,8 @@ function routeAutoChannelFirst(
   stickyRecord: StickyRecord | undefined
 ): AssistantMessageEventStream {
   const eventStream = createAssistantMessageEventStream();
+  const attemptedRoutes: string[] = [];
+  const attemptedChannels: string[] = [];
   
   (async () => {
     try {
@@ -2084,42 +2614,30 @@ function routeAutoChannelFirst(
       if (stickyRecord) {
         const stickyKey = `${stickyRecord.modelId}@${stickyRecord.channel}`;
         const stickyModel = modelMap.get(stickyKey);
+        const stickyModelConfig = configuredModels.find(m => m.id === stickyRecord.modelId);
         
-        if (stickyModel && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
+        if (stickyModel && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
           debugLog(`[pi-router] Auto mode: trying sticky ${stickyKey}`);
-          
-          try {
-            const stream = forwardToProvider(stickyModel, context, options);
-            
-            routerState.activeChannels.set("auto", stickyRecord.channel);
-            updateFooterStatus("auto", stickyRecord.channel, stickyRecord.modelId);
-            
-            let firstEvent = true;
-            const streamStartTime = Date.now();
-            
-            for await (const event of stream) {
-              if (firstEvent) {
-                const latency = Date.now() - streamStartTime;
-                recordLatency(stickyRecord.modelId, stickyRecord.channel, latency);
-                updateHealthStatus(stickyRecord.modelId, stickyRecord.channel, true);
-                recordCircuitOutcome(stickyRecord.modelId, stickyRecord.channel, true);
-                updateStickyRecord("auto", stickyRecord.modelId, stickyRecord.channel, config);
-                firstEvent = false;
-              }
-              eventStream.push(event);
-            }
-            
-            eventStream.end();
-            return;
-          } catch (err) {
-            debugLog(`[pi-router] Auto mode: sticky ${stickyKey} failed, falling back`);
-            recordFailure(stickyRecord.modelId, stickyRecord.channel, String(err), config, configuredModels.find(m => m.id === stickyRecord.modelId)!);
-            recordCircuitOutcome(stickyRecord.modelId, stickyRecord.channel, false);
-            clearStickyRecord("router", config);
-          }
+          const ok = await relayAutoAttempt(
+            "auto",
+            stickyModelConfig,
+            stickyRecord.channel,
+            stickyModel,
+            "sticky route",
+            config.sortBy || "manual",
+            context,
+            options,
+            config,
+            eventStream,
+            attemptedRoutes,
+            attemptedChannels
+          );
+          if (ok) return;
+          debugLog(`[pi-router] Auto mode: sticky ${stickyKey} failed, falling back`);
+          clearStickyRecord("auto", config);
         } else {
           debugLog(`[pi-router] Auto mode: sticky model unavailable, clearing`);
-          clearStickyRecord("router", config);
+          clearStickyRecord("auto", config);
         }
       }
       
@@ -2144,60 +2662,38 @@ function routeAutoChannelFirst(
           }
 
           debugLog(`[pi-router] Auto mode attempting ${key}...`);
-          
-          try {
-            const stream = forwardToProvider(targetModel, context, options);
-            
-            routerState.activeChannels.set("auto", channel);
-            updateFooterStatus("auto", channel, modelConfig.id);
-            
-            logDecision({
-              timestamp: Date.now(),
-              modelId: "auto (router)",
-              selectedChannel: `${modelConfig.id}@${channel}`,
-              attemptedChannels: [channel],
-              sortStrategy: config.sortBy || "manual",
-              fallbackUsed: false,
-              reason: "auto mode (channelFirst)",
-            });
-            
-            let firstEvent = true;
-            const streamStartTime = Date.now();
-            
-            for await (const event of stream) {
-              if (firstEvent) {
-                const latency = Date.now() - streamStartTime;
-                recordLatency(modelConfig.id, channel, latency);
-                updateHealthStatus(modelConfig.id, channel, true);
-                recordCircuitOutcome(modelConfig.id, channel, true);
-                updateStickyRecord("auto", modelConfig.id, channel, config);
-                firstEvent = false;
-              }
-              eventStream.push(event);
-            }
-            
-            eventStream.end();
-            return;
-          } catch (err) {
-            console.error(`[pi-router] Auto mode failed on ${key}:`, err);
-            recordFailure(modelConfig.id, channel, String(err), config, modelConfig);
-            recordCircuitOutcome(modelConfig.id, channel, false);
-          }
+          const ok = await relayAutoAttempt(
+            "auto",
+            modelConfig,
+            channel,
+            targetModel,
+            "auto mode (channelFirst)",
+            config.sortBy || "manual",
+            context,
+            options,
+            config,
+            eventStream,
+            attemptedRoutes,
+            attemptedChannels
+          );
+          if (ok) return;
         }
       }
 
-      // All exhausted - show diagnostic info (channelFirst)
-      const totalChannels = configuredModels.reduce((sum, m) => sum + m.channels.length, 0);
-      const skippedChannels = configuredModels.reduce((sum, m) => {
-        return sum + m.channels.filter(ch => !canTryAutoChannel(m.id, ch)).length;
-      }, 0);
-
-      console.error(`[pi-router] Auto mode (channelFirst): all models and channels exhausted`);
-      console.error(`[pi-router] Total channels: ${totalChannels}, Skipped (cooldown/circuit): ${skippedChannels}`);
-      console.error(`[pi-router] Hint: Check /router explain for detailed failure info`);
+      const failures = Array.from(routerState.lastFailures.values()).flat().slice(-Math.max(1, attemptedRoutes.length));
+      const errorMsg = [
+        `[pi-router] Auto router failed: all configured routes were exhausted.`,
+        attemptedRoutes.length > 0 ? `Tried routes: ${attemptedRoutes.join(" → ")}` : "Tried routes: none",
+        failures.length > 0 ? "Recent failures:\n" + failures.map((f, i) => `  ${i + 1}. ${f.channel}: ${formatUserFacingFailure(f.error)}`).join("\n") : "Recent failures: none recorded",
+        "Run '/router explain' for detailed diagnostics.",
+      ].join("\n");
+      debugLog(errorMsg);
+      eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, errorMsg));
       eventStream.end();
     } catch (err) {
-      console.error("[pi-router] Auto mode error:", err);
+      const error = getErrorMessage(err);
+      debugLog("[pi-router] Auto mode error:", err);
+      eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, formatUserFacingFailure(error)));
       eventStream.end();
     }
   })();
@@ -2216,12 +2712,16 @@ function routeAutoCustom(
   stickyRecord: StickyRecord | undefined
 ): AssistantMessageEventStream {
   const eventStream = createAssistantMessageEventStream();
+  const attemptedRoutes: string[] = [];
+  const attemptedChannels: string[] = [];
 
   (async () => {
     try {
       // Validate customOrder exists
       if (!config.customOrder || config.customOrder.length === 0) {
-        console.error("[pi-router] Custom strategy requires customOrder array");
+        const errorMsg = "[pi-router] Custom strategy requires customOrder array";
+        debugLog(errorMsg);
+        eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, errorMsg));
         eventStream.end();
         return;
       }
@@ -2230,46 +2730,30 @@ function routeAutoCustom(
       if (stickyRecord) {
         const stickyKey = `${stickyRecord.modelId}@${stickyRecord.channel}`;
         const stickyModel = modelMap.get(stickyKey);
+        const stickyModelConfig = config.models?.find(m => m.id === stickyRecord.modelId);
 
-        if (stickyModel && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
+        if (stickyModel && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
           debugLog(`[pi-router] Auto mode: trying sticky ${stickyKey}`);
-
-          try {
-            const stream = forwardToProvider(stickyModel, context, options);
-
-            routerState.activeChannels.set("auto", stickyRecord.channel);
-            updateFooterStatus("auto", stickyRecord.channel, stickyRecord.modelId);
-
-            let firstEvent = true;
-            const streamStartTime = Date.now();
-
-            for await (const event of stream) {
-              if (firstEvent) {
-                const latency = Date.now() - streamStartTime;
-                recordLatency(stickyRecord.modelId, stickyRecord.channel, latency);
-                updateHealthStatus(stickyRecord.modelId, stickyRecord.channel, true);
-                recordCircuitOutcome(stickyRecord.modelId, stickyRecord.channel, true);
-                updateStickyRecord("auto", stickyRecord.modelId, stickyRecord.channel, config);
-                firstEvent = false;
-              }
-              eventStream.push(event);
-            }
-
-            eventStream.end();
-            return;
-          } catch (err) {
-            debugLog(`[pi-router] Auto mode: sticky ${stickyKey} failed, falling back`);
-            const [modelId] = stickyKey.split("@");
-            const modelConfig = config.models?.find(m => m.id === modelId);
-            if (modelConfig) {
-              recordFailure(stickyRecord.modelId, stickyRecord.channel, String(err), config, modelConfig);
-            }
-            recordCircuitOutcome(stickyRecord.modelId, stickyRecord.channel, false);
-            clearStickyRecord("router", config);
-          }
+          const ok = await relayAutoAttempt(
+            "auto",
+            stickyModelConfig,
+            stickyRecord.channel,
+            stickyModel,
+            "sticky route",
+            "custom",
+            context,
+            options,
+            config,
+            eventStream,
+            attemptedRoutes,
+            attemptedChannels
+          );
+          if (ok) return;
+          debugLog(`[pi-router] Auto mode: sticky ${stickyKey} failed, falling back`);
+          clearStickyRecord("auto", config);
         } else {
           debugLog(`[pi-router] Auto mode: sticky model unavailable, clearing`);
-          clearStickyRecord("router", config);
+          clearStickyRecord("auto", config);
         }
       }
 
@@ -2278,12 +2762,13 @@ function routeAutoCustom(
         const [modelId, channel] = item.split("@");
 
         if (!modelId || !channel) {
-          console.warn(`[pi-router] Invalid customOrder item: ${item}`);
+          debugLog(`[pi-router] Invalid customOrder item: ${item}`);
           continue;
         }
 
         const key = `${modelId}@${channel}`;
         const targetModel = modelMap.get(key);
+        const modelConfig = config.models?.find(m => m.id === modelId) || { id: modelId, channels: [channel] };
 
         if (!targetModel) {
           debugLog(`[pi-router] Auto mode: ${key} not found in modelMap`);
@@ -2296,63 +2781,37 @@ function routeAutoCustom(
         }
 
         debugLog(`[pi-router] Auto mode attempting ${key}...`);
-
-        try {
-          const stream = forwardToProvider(targetModel, context, options);
-
-          routerState.activeChannels.set("auto", channel);
-          updateFooterStatus(modelId, channel);
-
-          logDecision({
-            timestamp: Date.now(),
-            modelId: "auto (router)",
-            selectedChannel: key,
-            attemptedChannels: [channel],
-            sortStrategy: "custom",
-            fallbackUsed: false,
-            reason: "auto mode (custom order)",
-          });
-
-          let firstEvent = true;
-          const streamStartTime = Date.now();
-
-          for await (const event of stream) {
-            if (firstEvent) {
-              const latency = Date.now() - streamStartTime;
-              recordLatency(modelId, channel, latency);
-              updateHealthStatus(modelId, channel, true);
-              recordCircuitOutcome(modelId, channel, true);
-              updateStickyRecord("auto", modelId, channel, config);
-              firstEvent = false;
-            }
-            eventStream.push(event);
-          }
-
-          eventStream.end();
-          return;
-        } catch (err) {
-          console.error(`[pi-router] Auto mode failed on ${key}:`, err);
-          const modelConfig = config.models?.find(m => m.id === modelId);
-          if (modelConfig) {
-            recordFailure(modelId, channel, String(err), config, modelConfig);
-          }
-          recordCircuitOutcome(modelId, channel, false);
-        }
+        const ok = await relayAutoAttempt(
+          "auto",
+          modelConfig,
+          channel,
+          targetModel,
+          "auto mode (custom order)",
+          "custom",
+          context,
+          options,
+          config,
+          eventStream,
+          attemptedRoutes,
+          attemptedChannels
+        );
+        if (ok) return;
       }
 
-      // All exhausted - show diagnostic info (custom)
-      const totalChannels = config.customOrder.length;
-      const skippedChannels = config.customOrder.filter(item => {
-        const [modelId, channel] = item.split("@");
-        return !canTryAutoChannel(modelId, channel);
-      }).length;
-
-      console.error(`[pi-router] Auto mode (custom): all channels exhausted`);
-      console.error(`[pi-router] Total channels: ${totalChannels}, Skipped (cooldown/circuit): ${skippedChannels}`);
-      console.error(`[pi-router] Hint: Check /router explain for detailed failure info`);
+      const failures = Array.from(routerState.lastFailures.values()).flat().slice(-Math.max(1, attemptedRoutes.length));
+      const errorMsg = [
+        `[pi-router] Auto router failed: all custom routes were exhausted.`,
+        attemptedRoutes.length > 0 ? `Tried routes: ${attemptedRoutes.join(" → ")}` : "Tried routes: none",
+        failures.length > 0 ? "Recent failures:\n" + failures.map((f, i) => `  ${i + 1}. ${f.channel}: ${formatUserFacingFailure(f.error)}`).join("\n") : "Recent failures: none recorded",
+        "Run '/router explain' for detailed diagnostics.",
+      ].join("\n");
+      debugLog(errorMsg);
+      eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, errorMsg));
       eventStream.end();
     } catch (err) {
-      console.error("[pi-router] Auto mode error:", err);
+      const error = getErrorMessage(err);
+      debugLog("[pi-router] Auto mode error:", err);
+      eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, formatUserFacingFailure(error)));
       eventStream.end();
     }
   })();
@@ -2373,6 +2832,8 @@ function routeAutoModelFirst(
   stickyRecord: StickyRecord | undefined
 ): AssistantMessageEventStream {
   const eventStream = createAssistantMessageEventStream();
+  const attemptedRoutes: string[] = [];
+  const attemptedChannels: string[] = [];
   
   (async () => {
     try {
@@ -2380,42 +2841,30 @@ function routeAutoModelFirst(
       if (stickyRecord) {
         const stickyKey = `${stickyRecord.modelId}@${stickyRecord.channel}`;
         const stickyModel = modelMap.get(stickyKey);
+        const stickyModelConfig = configuredModels.find(m => m.id === stickyRecord.modelId);
         
-        if (stickyModel && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
+        if (stickyModel && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
           debugLog(`[pi-router] Auto mode: trying sticky ${stickyKey}`);
-          
-          try {
-            const stream = forwardToProvider(stickyModel, context, options);
-            
-            routerState.activeChannels.set("auto", stickyRecord.channel);
-            updateFooterStatus("auto", stickyRecord.channel, stickyRecord.modelId);
-            
-            let firstEvent = true;
-            const streamStartTime = Date.now();
-            
-            for await (const event of stream) {
-              if (firstEvent) {
-                const latency = Date.now() - streamStartTime;
-                recordLatency(stickyRecord.modelId, stickyRecord.channel, latency);
-                updateHealthStatus(stickyRecord.modelId, stickyRecord.channel, true);
-                recordCircuitOutcome(stickyRecord.modelId, stickyRecord.channel, true);
-                updateStickyRecord("auto", stickyRecord.modelId, stickyRecord.channel, config);
-                firstEvent = false;
-              }
-              eventStream.push(event);
-            }
-            
-            eventStream.end();
-            return;
-          } catch (err) {
-            debugLog(`[pi-router] Auto mode: sticky ${stickyKey} failed, falling back`);
-            recordFailure(stickyRecord.modelId, stickyRecord.channel, String(err), config, configuredModels.find(m => m.id === stickyRecord.modelId)!);
-            recordCircuitOutcome(stickyRecord.modelId, stickyRecord.channel, false);
-            clearStickyRecord("router", config);
-          }
+          const ok = await relayAutoAttempt(
+            "auto",
+            stickyModelConfig,
+            stickyRecord.channel,
+            stickyModel,
+            "sticky route",
+            config.sortBy || "manual",
+            context,
+            options,
+            config,
+            eventStream,
+            attemptedRoutes,
+            attemptedChannels
+          );
+          if (ok) return;
+          debugLog(`[pi-router] Auto mode: sticky ${stickyKey} failed, falling back`);
+          clearStickyRecord("auto", config);
         } else {
           debugLog(`[pi-router] Auto mode: sticky model unavailable, clearing`);
-          clearStickyRecord("router", config);
+          clearStickyRecord("auto", config);
         }
       }
       
@@ -2436,60 +2885,38 @@ function routeAutoModelFirst(
           if (!canTryAutoChannel(modelConfig.id, channel)) continue;
           
           debugLog(`[pi-router] Auto mode attempting ${key}...`);
-          
-          try {
-            const stream = forwardToProvider(targetModel, context, options);
-            
-            routerState.activeChannels.set("auto", channel);
-            updateFooterStatus("auto", channel, modelConfig.id);
-            
-            logDecision({
-              timestamp: Date.now(),
-              modelId: "auto (router)",
-              selectedChannel: `${modelConfig.id}@${channel}`,
-              attemptedChannels: [channel],
-              sortStrategy: config.sortBy || "manual",
-              fallbackUsed: false,
-              reason: "auto mode (custom)",
-            });
-            
-            let firstEvent = true;
-            const streamStartTime = Date.now();
-            
-            for await (const event of stream) {
-              if (firstEvent) {
-                const latency = Date.now() - streamStartTime;
-                recordLatency(modelConfig.id, channel, latency);
-                updateHealthStatus(modelConfig.id, channel, true);
-                recordCircuitOutcome(modelConfig.id, channel, true);
-                updateStickyRecord("auto", modelConfig.id, channel, config);
-                firstEvent = false;
-              }
-              eventStream.push(event);
-            }
-
-            eventStream.end();
-            return;
-          } catch (err) {
-            console.error(`[pi-router] Auto mode failed on ${key}:`, err);
-            recordFailure(modelConfig.id, channel, String(err), config, modelConfig);
-            recordCircuitOutcome(modelConfig.id, channel, false);
-          }
+          const ok = await relayAutoAttempt(
+            "auto",
+            modelConfig,
+            channel,
+            targetModel,
+            "auto mode (modelFirst)",
+            config.sortBy || "manual",
+            context,
+            options,
+            config,
+            eventStream,
+            attemptedRoutes,
+            attemptedChannels
+          );
+          if (ok) return;
         }
       }
 
-      // All exhausted - show diagnostic info (custom)
-      const totalChannels = configuredModels.reduce((sum, m) => sum + m.channels.length, 0);
-      const skippedChannels = configuredModels.reduce((sum, m) => {
-        return sum + m.channels.filter(ch => !canTryAutoChannel(m.id, ch)).length;
-      }, 0);
-
-      console.error(`[pi-router] Auto mode (custom): all models and channels exhausted`);
-      console.error(`[pi-router] Total channels: ${totalChannels}, Skipped (cooldown/circuit): ${skippedChannels}`);
-      console.error(`[pi-router] Hint: Check /router explain for detailed failure info`);
+      const failures = Array.from(routerState.lastFailures.values()).flat().slice(-Math.max(1, attemptedRoutes.length));
+      const errorMsg = [
+        `[pi-router] Auto router failed: all model-first routes were exhausted.`,
+        attemptedRoutes.length > 0 ? `Tried routes: ${attemptedRoutes.join(" → ")}` : "Tried routes: none",
+        failures.length > 0 ? "Recent failures:\n" + failures.map((f, i) => `  ${i + 1}. ${f.channel}: ${formatUserFacingFailure(f.error)}`).join("\n") : "Recent failures: none recorded",
+        "Run '/router explain' for detailed diagnostics.",
+      ].join("\n");
+      debugLog(errorMsg);
+      eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, errorMsg));
       eventStream.end();
     } catch (err) {
-      console.error("[pi-router] Auto mode error:", err);
+      const error = getErrorMessage(err);
+      debugLog("[pi-router] Auto mode error:", err);
+      eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, formatUserFacingFailure(error)));
       eventStream.end();
     }
   })();
@@ -2590,18 +3017,277 @@ function determineChannelOrder(
 /**
  * Forward request to actual provider's streamSimple
  */
-function forwardToProvider(
-  model: PiModel,
-  context: Context,
-  options?: SimpleStreamOptions
-): AssistantMessageEventStream {
-  // Convert PiModel to Model<Api> format expected by pi-ai
-  const realModel: Model<Api> = {
+function createRouterErrorMessage(
+  modelId: string,
+  provider: string,
+  api: Api,
+  error: string,
+  stopReason: "error" | "aborted" = "error"
+): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [],
+    api,
+    provider,
+    model: modelId,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason,
+    errorMessage: error,
+    timestamp: Date.now(),
+  };
+}
+
+function createRouterErrorEvent(
+  modelId: string,
+  provider: string,
+  api: Api,
+  error: string,
+  stopReason: "error" | "aborted" = "error"
+): AssistantMessageEvent {
+  return {
+    type: "error",
+    reason: stopReason,
+    error: createRouterErrorMessage(modelId, provider, api, error, stopReason),
+  };
+}
+
+function getStreamEventFailure(event: AssistantMessageEvent): string | undefined {
+  if (event.type !== "error") return undefined;
+
+  const errorMessage = event.error.errorMessage;
+  if (typeof errorMessage === "string" && errorMessage.trim().length > 0) {
+    return errorMessage;
+  }
+
+  return "Provider stream returned an error event";
+}
+
+function isResponseCommitEvent(event: AssistantMessageEvent): boolean {
+  switch (event.type) {
+    case "done":
+    case "toolcall_start":
+    case "toolcall_end":
+      return true;
+    case "text_delta":
+    case "thinking_delta":
+    case "toolcall_delta":
+      return !!event.delta;
+    case "text_end":
+      return !!event.content;
+    case "thinking_end":
+      return !!event.content;
+    default:
+      return false;
+  }
+}
+
+async function nextStreamEventWithTimeout(
+  iterator: AsyncIterator<AssistantMessageEvent>,
+  timeoutMs: number,
+  signal?: AbortSignal
+): Promise<IteratorResult<AssistantMessageEvent>> {
+  if (signal?.aborted) {
+    throw new Error("Request was aborted");
+  }
+
+  let timeout: NodeJS.Timeout | undefined;
+  let abortHandler: (() => void) | undefined;
+
+  try {
+    return await new Promise<IteratorResult<AssistantMessageEvent>>((resolve, reject) => {
+      if (timeoutMs > 0) {
+        timeout = setTimeout(() => {
+          reject(new Error(`Router attempt timed out after ${timeoutMs}ms waiting for provider stream`));
+        }, timeoutMs);
+      }
+
+      abortHandler = () => reject(new Error("Request was aborted"));
+      signal?.addEventListener("abort", abortHandler, { once: true });
+
+      iterator.next().then(resolve, reject);
+    });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (abortHandler) signal?.removeEventListener("abort", abortHandler);
+  }
+}
+
+function getRouterTimeoutMs(
+  options: SimpleStreamOptions | undefined,
+  config?: RouterConfig
+): number {
+  if (config?.request?.timeoutMs !== undefined) {
+    return config.request.timeoutMs;
+  }
+
+  // pi may pass a global/provider timeout (often 10s) into custom providers.
+  // That is too aggressive for router failover: it makes every real channel,
+  // including official providers, fail before they can emit the first token.
+  // Treat it as a ceiling only when it is more generous than the router default.
+  const incomingTimeoutMs = options?.timeoutMs;
+  if (incomingTimeoutMs !== undefined && incomingTimeoutMs > DEFAULT_ROUTER_TIMEOUT_MS) {
+    return incomingTimeoutMs;
+  }
+
+  return DEFAULT_ROUTER_TIMEOUT_MS;
+}
+
+type RelayProviderStreamResult =
+  | { ok: true }
+  | { ok: false; error: string; aborted: boolean; committed: boolean };
+
+const providerStreamAborters = new WeakMap<AssistantMessageEventStream, () => void>();
+
+function abortProviderStream(stream: AssistantMessageEventStream): void {
+  providerStreamAborters.get(stream)?.();
+}
+
+function createLinkedAbortController(signal?: AbortSignal): { controller: AbortController; cleanup: () => void } {
+  const controller = new AbortController();
+  let abortHandler: (() => void) | undefined;
+
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort();
+    } else {
+      abortHandler = () => controller.abort();
+      signal.addEventListener("abort", abortHandler, { once: true });
+    }
+  }
+
+  return {
+    controller,
+    cleanup: () => {
+      if (abortHandler) signal?.removeEventListener("abort", abortHandler);
+    },
+  };
+}
+
+async function relayProviderStream(
+  stream: AssistantMessageEventStream,
+  outputStream: AssistantMessageEventStream,
+  options: SimpleStreamOptions | undefined,
+  config: RouterConfig | undefined,
+  onCommit: () => void
+): Promise<RelayProviderStreamResult> {
+  const iterator = stream[Symbol.asyncIterator]();
+  const bufferedEvents: AssistantMessageEvent[] = [];
+  const timeoutMs = getRouterTimeoutMs(options, config);
+  let committed = false;
+  let terminalPushed = false;
+
+  try {
+    while (true) {
+      const result = await nextStreamEventWithTimeout(iterator, timeoutMs, options?.signal);
+      if (result.done) {
+        if (terminalPushed) {
+          return { ok: true };
+        }
+        throw new Error(committed
+          ? "Provider stream ended before final message"
+          : "Provider stream ended before producing a response");
+      }
+
+      const event = result.value;
+      const failure = getStreamEventFailure(event);
+      if (failure) {
+        throw new Error(failure);
+      }
+
+      if (!committed) {
+        if (isResponseCommitEvent(event)) {
+          onCommit();
+          committed = true;
+          for (const bufferedEvent of bufferedEvents) {
+            outputStream.push(bufferedEvent);
+          }
+          bufferedEvents.length = 0;
+          outputStream.push(event);
+        } else {
+          bufferedEvents.push(event);
+        }
+      } else {
+        outputStream.push(event);
+      }
+
+      if (event.type === "done") {
+        terminalPushed = true;
+      }
+    }
+  } catch (err) {
+    abortProviderStream(stream);
+    const error = getErrorMessage(err);
+    return {
+      ok: false,
+      error,
+      aborted: isAbortError(error) || isAbortSignalAborted(options),
+      committed,
+    };
+  }
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isAbortError(error: string): boolean {
+  const lower = error.toLowerCase();
+  return lower.includes("aborted") || lower.includes("aborterror") || lower.includes("the operation was aborted");
+}
+
+function isAbortSignalAborted(options: SimpleStreamOptions | undefined): boolean {
+  return !!options?.signal?.aborted;
+}
+
+function formatUserFacingFailure(error: string): string {
+  const text = error || "";
+  const lower = text.toLowerCase();
+  const code = text.match(/(?:^|\D)(401|403|408|409|429|500|502|503|504)(?:\D|$)/)?.[1];
+
+  if (code === "401" || lower.includes("invalid token") || lower.includes("invalid api key") || text.includes("无效的令牌")) {
+    return "认证失败（401/token 无效）";
+  }
+  if (code === "403" || lower.includes("forbidden") || lower.includes("blocked")) {
+    return lower.includes("blocked") ? "请求被平台拦截（403）" : "请求被拒绝（403）";
+  }
+  if (code === "429" || lower.includes("rate limit") || lower.includes("too many requests")) {
+    return "触发限流（429）";
+  }
+  if (lower.includes("router attempt timed out")) {
+    return "等待首个响应超时";
+  }
+  if (code === "408" || lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
+    return "上游请求超时";
+  }
+  if (lower.includes("connection error") || lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("connect")) {
+    return "连接失败";
+  }
+  if (code && code.startsWith("5")) {
+    return `上游服务错误（${code}）`;
+  }
+
+  return "上游返回错误（详见 /router explain）";
+}
+
+function formatUserFacingFailureList(failures: Array<{ channel: string; error: string }>): string[] {
+  return failures.map(f => `  • ${f.channel}: ${formatUserFacingFailure(f.error)}`);
+}
+
+function toPiAiModel(model: PiModel): Model<Api> {
+  return {
     id: model.id,
     name: model.name || model.id,
     provider: model.provider,
     api: (model.api || "openai-completions") as Api,
     baseUrl: model.baseUrl || "",
+    headers: model.headers,
     reasoning: model.reasoning || false,
     input: (model.input || ["text"]) as ("text" | "image")[],
     contextWindow: model.contextWindow || 200000,
@@ -2610,11 +3296,138 @@ function forwardToProvider(
     compat: model.compat,
     thinkingLevelMap: model.thinkingLevelMap,
   };
+}
   
-  debugLog(`[pi-router] Forwarding to ${model.provider} streamSimple`);
-  
-  // Forward to pi-ai's streamSimple
-  return streamSimple(realModel, context, options);
+async function applyUpstreamRequestAuth(
+  model: Model<Api>,
+  options: SimpleStreamOptions | undefined,
+): Promise<SimpleStreamOptions | undefined> {
+  const nextOptions: SimpleStreamOptions | undefined = options ? { ...options } : undefined;
+
+  if (nextOptions?.apiKey === ROUTER_DUMMY_API_KEY) {
+    // pi authenticates the selected router/* model before entering our custom
+    // streamSimple, so options.apiKey is the router provider's dummy key. If we
+    // forward it, pi-ai will prefer that explicit key over the real upstream
+    // provider auth and every channel fails with 401 (often visible as
+    // "api key: ****uter"). Drop it before resolving real upstream auth.
+    delete nextOptions.apiKey;
+  }
+
+  const modelRegistry = routerState.currentModelRegistry;
+  if (!modelRegistry?.getApiKeyAndHeaders) {
+    return nextOptions;
+  }
+
+  const auth = await modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok) {
+    throw new Error(auth.error || `No API key found for "${model.provider}"`);
+  }
+
+  const headers = auth.headers || nextOptions?.headers
+    ? { ...auth.headers, ...nextOptions?.headers }
+    : undefined;
+
+  return {
+    ...nextOptions,
+    ...(auth.apiKey ? { apiKey: auth.apiKey } : {}),
+    ...(headers ? { headers } : {}),
+  };
+}
+
+function forwardToProvider(
+  model: PiModel,
+  context: Context,
+  options?: SimpleStreamOptions,
+  config?: RouterConfig
+): AssistantMessageEventStream {
+  const realModel = toPiAiModel(model);
+  const routedOptions = applyRouterRequestOptions(options, config);
+  const eventStream = createAssistantMessageEventStream();
+  const linkedAbort = createLinkedAbortController(routedOptions?.signal);
+  providerStreamAborters.set(eventStream, () => linkedAbort.controller.abort());
+
+  (async () => {
+    try {
+      if (linkedAbort.controller.signal.aborted) {
+        eventStream.push(createRouterErrorEvent(model.id, model.provider, realModel.api, "Request was aborted", "aborted"));
+        eventStream.end();
+        return;
+      }
+
+      const upstreamOptions = await applyUpstreamRequestAuth(realModel, routedOptions);
+      const providerOptions = upstreamOptions
+        ? { ...upstreamOptions, signal: linkedAbort.controller.signal }
+        : { signal: linkedAbort.controller.signal };
+      // Do not pass pi/router timeoutMs into the provider SDK. Some SDKs apply it
+      // as a hard request timer and still surface the generic "Request timed out."
+      // message, which makes slow first-token models (DeepSeek reasoning variants)
+      // look dead after the outer 10s provider timeout. pi-router enforces the
+      // per-attempt timeout in relayProviderStream and aborts this upstream request
+      // itself when moving to the next channel.
+      delete providerOptions.timeoutMs;
+      debugLog(`[pi-router] Forwarding to ${model.provider} streamSimple`);
+
+      const upstreamStream = streamSimple(realModel, context, providerOptions);
+      for await (const event of upstreamStream) {
+        eventStream.push(event);
+      }
+      eventStream.end();
+    } catch (err) {
+      const error = getErrorMessage(err);
+      const stopReason = isAbortError(error) || linkedAbort.controller.signal.aborted ? "aborted" : "error";
+      debugLog(`[pi-router] Upstream ${model.id}@${model.provider} failed:`, err);
+      eventStream.push(createRouterErrorEvent(model.id, model.provider, realModel.api, error, stopReason));
+      eventStream.end();
+    } finally {
+      providerStreamAborters.delete(eventStream);
+      linkedAbort.cleanup();
+    }
+  })();
+
+  return eventStream;
+}
+
+function applyRouterRequestOptions(
+  options: SimpleStreamOptions | undefined,
+  config?: RouterConfig
+): SimpleStreamOptions | undefined {
+  if (!config) return options;
+
+  const routedOptions: SimpleStreamOptions = {
+    ...options,
+    // pi may pass provider-level retries into streamSimple. pi-router owns
+    // retries/failover, so default the provider client to fail fast and let the
+    // next configured channel run. Users can opt back in via request.maxRetries.
+    maxRetries: config.request?.maxRetries ?? 0,
+    // Avoid hanging indefinitely on an upstream stream that never produces an
+    // event. Users can override with request.timeoutMs.
+    timeoutMs: getRouterTimeoutMs(options, config),
+  };
+
+  const configuredMaxTokens = config.request?.maxTokens;
+  const incomingMaxTokens = options?.maxTokens;
+  const maxTokens = configuredMaxTokens ?? (
+    incomingMaxTokens === undefined
+      ? undefined
+      : Math.min(incomingMaxTokens, DEFAULT_ROUTER_MAX_TOKENS)
+  );
+  if (maxTokens !== undefined && maxTokens > 0) {
+    routedOptions.maxTokens = maxTokens;
+  }
+
+  if (routedOptions.timeoutMs !== undefined && routedOptions.timeoutMs <= 0) {
+    delete routedOptions.timeoutMs;
+  }
+
+  if (!routedOptions.signal && options?.signal) {
+    routedOptions.signal = options.signal;
+  }
+
+  if (config.request?.maxRetryDelayMs !== undefined) {
+    routedOptions.maxRetryDelayMs = config.request.maxRetryDelayMs;
+  }
+
+  return routedOptions;
 }
 
 /**
@@ -2630,12 +3443,11 @@ function createFailoverStream(
   modelMap: Map<string, PiModel>
 ): AssistantMessageEventStream {
   let currentChannelIndex = 0;
-  let currentStream: AssistantMessageEventStream | null = null;
-  let currentChannel: string | null = null;
   let attemptedChannels: string[] = [];
   const sortStrategy = modelConfig.sortBy || config.sortBy || "config";
+  const eventStream = createAssistantMessageEventStream();
   
-  const tryNextChannel = (): AssistantMessageEventStream | null => {
+  const tryNextChannel = (): { channel: string; stream: AssistantMessageEventStream } | null => {
     while (currentChannelIndex < channelOrder.length) {
       const channel = channelOrder[currentChannelIndex];
       currentChannelIndex++;
@@ -2658,23 +3470,18 @@ function createFailoverStream(
       
       const targetModel = modelMap.get(key);
       if (!targetModel) {
-        console.warn(`[pi-router] Model not found: ${key}`);
+        debugLog(`[pi-router] Model not found: ${key}`);
         continue;
       }
       
       debugLog(`[pi-router] Attempting ${channel}...`);
       attemptedChannels.push(channel);
-
-      // Update footer immediately to show which channel we're trying
-      updateFooterStatus(modelId, channel);
+      updateFooterStatus(modelId, channel, undefined, "trying", [...attemptedChannels]);
 
       try {
-        currentChannel = channel;
-        currentStream = forwardToProvider(targetModel, context, options);
+        const stream = forwardToProvider(targetModel, context, options, config);
         debugLog(`[pi-router] Started stream on ${key}`);
-        routerState.activeChannels.set(modelId, channel);
 
-        // Log decision
         logDecision({
           timestamp: Date.now(),
           modelId,
@@ -2685,83 +3492,51 @@ function createFailoverStream(
           reason: attemptedChannels.length === 1 ? "first choice" : `failover after ${attemptedChannels.length - 1} failures`,
         });
 
-        return currentStream;
+        return { channel, stream };
       } catch (err) {
-        console.error(`[pi-router] Failed to start stream on ${channel}:`, err);
-        recordFailure(modelId, channel, String(err), config, modelConfig);
+        const error = err instanceof Error ? err.message : String(err);
+        debugLog(`[pi-router] Failed to start stream on ${channel}:`, err);
+        recordFailure(modelId, channel, error, config, modelConfig);
+        updateHealthStatus(modelId, channel, false);
         recordCircuitOutcome(modelId, channel, false);
+        updateFooterStatus(modelId, channel, undefined, "failed", [...attemptedChannels], error);
       }
     }
     
     return null;
   };
   
-  // Create event stream and handle failover asynchronously
-  const eventStream = createAssistantMessageEventStream();
+  const relayAttempt = async (
+    channel: string,
+    stream: AssistantMessageEventStream
+  ): Promise<RelayProviderStreamResult> => {
+    const streamStartTime = Date.now();
+    return relayProviderStream(
+      stream,
+      eventStream,
+      options,
+      config,
+      () => {
+        const latency = Date.now() - streamStartTime;
+        recordLatency(modelId, channel, latency);
+        updateHealthStatus(modelId, channel, true);
+        recordCircuitOutcome(modelId, channel, true);
+        routerState.activeChannels.set(modelId, channel);
+        updateFooterStatus(modelId, channel, undefined, "success", [...attemptedChannels]);
   
-  // Track timing for latency measurement
-  let streamStartTime = 0;
-  
-  // Start async process to try channels and forward events
-  (async () => {
-    let stream = tryNextChannel();
-    
-    if (!stream) {
-      // All channels failed, try fallback model
-      await tryModelFallback(
-        modelId,
-        context,
-        options,
-        config,
-        modelConfig,
-        modelMap,
-        null, // pi reference not needed for now
-        eventStream
-      );
-      return;
-    }
-    
-    streamStartTime = Date.now();
-    
-    try {
-      let firstEvent = true;
-      for await (const event of stream) {
-        // Record latency on first event (time to first token)
-        if (firstEvent && currentChannel) {
-          const latency = Date.now() - streamStartTime;
-          recordLatency(modelId, currentChannel, latency);
-          updateHealthStatus(modelId, currentChannel, true);
-          recordCircuitOutcome(modelId, currentChannel, true);
-
-          // Update footer on first successful event to confirm the channel worked
-          updateFooterStatus(modelId, currentChannel);
-
-          // Update the most recent decision with latency
-          if (decisionLogger.decisions.length > 0) {
-            const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
-            if (lastDecision.modelId === modelId && lastDecision.selectedChannel === currentChannel) {
-              lastDecision.latencyMs = latency;
-            }
-          }
-
-          firstEvent = false;
+        const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
+        if (lastDecision?.modelId === modelId && lastDecision.selectedChannel === channel) {
+          lastDecision.latencyMs = latency;
         }
-        eventStream.push(event);
       }
-      eventStream.end();
-    } catch (err) {
-      console.error(`[pi-router] Stream error on ${currentChannel}:`, err);
-
-      if (currentChannel) {
-        recordFailure(modelId, currentChannel, String(err), config, modelConfig);
-        updateHealthStatus(modelId, currentChannel, false);
-      }
-
-      // Try next channel
-      stream = tryNextChannel();
-
-      if (!stream) {
-        // All channels exhausted, try fallback model
+    );
+  };
+  
+  (async () => {
+    while (true) {
+      const attempt = tryNextChannel();
+    
+      if (!attempt) {
         await tryModelFallback(
           modelId,
           context,
@@ -2775,54 +3550,40 @@ function createFailoverStream(
         return;
       }
       
-      // Reset timing for new channel
-      streamStartTime = Date.now();
-      
-      // Forward events from the new stream
-      try {
-        let firstEvent = true;
-        for await (const event of stream) {
-          if (firstEvent && currentChannel) {
-            const latency = Date.now() - streamStartTime;
-            recordLatency(modelId, currentChannel, latency);
-            updateHealthStatus(modelId, currentChannel, true);
-            recordCircuitOutcome(modelId, currentChannel, true);
-
-            // Update footer on first successful event
-            updateFooterStatus(modelId, currentChannel);
-
-            // Update the most recent decision with latency
-            if (decisionLogger.decisions.length > 0) {
-              const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
-              if (lastDecision.modelId === modelId && lastDecision.selectedChannel === currentChannel) {
-                lastDecision.latencyMs = latency;
-              }
-            }
-
-            firstEvent = false;
-          }
-          eventStream.push(event);
-        }
+      const relayResult = await relayAttempt(attempt.channel, attempt.stream);
+      if (relayResult.ok) {
         eventStream.end();
-      } catch (err2) {
-        console.error(`[pi-router] Secondary stream error:`, err2);
-        if (currentChannel) {
-          updateHealthStatus(modelId, currentChannel, false);
-        }
-        // Try model fallback as last resort
-        await tryModelFallback(
-          modelId,
-          context,
-          options,
-          config,
-          modelConfig,
-          modelMap,
-          null,
-          eventStream
-        );
+        return;
       }
+      
+      const { error, aborted, committed } = relayResult as Extract<RelayProviderStreamResult, { ok: false }>;
+      debugLog(`[pi-router] Stream error on ${attempt.channel}:`, error);
+
+      if (aborted) {
+        updateFooterStatus(modelId, attempt.channel, undefined, "aborted", [...attemptedChannels], error);
+        eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, error, "aborted"));
+        eventStream.end();
+        return;
+      }
+
+      if (committed) {
+        updateFooterStatus(modelId, attempt.channel, undefined, "failed", [...attemptedChannels], error);
+        eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, formatUserFacingFailure(error)));
+        eventStream.end();
+        return;
+      }
+
+      recordFailure(modelId, attempt.channel, error, config, modelConfig);
+      updateHealthStatus(modelId, attempt.channel, false);
+      recordCircuitOutcome(modelId, attempt.channel, false);
+      updateFooterStatus(modelId, attempt.channel, undefined, "failed", [...attemptedChannels], error);
     }
-  })();
+  })().catch((err) => {
+    const error = err instanceof Error ? err.message : String(err);
+    debugLog(`[pi-router] Unexpected router error for ${modelId}:`, err);
+    eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, error));
+    eventStream.end();
+  });
   
   return eventStream;
 }
@@ -2853,13 +3614,15 @@ function recordFailure(
   let cooldownMs: number;
 
   // Fast-fail errors (connection issues) should have shorter cooldown
+  const lowerError = error.toLowerCase();
   const isFastFailError =
-    error.includes("ECONNREFUSED") ||
-    error.includes("ETIMEDOUT") ||
-    error.includes("ENOTFOUND") ||
-    error.includes("Connection error") ||
-    error.includes("timeout") ||
-    error.includes("connect");
+    lowerError.includes("econnrefused") ||
+    lowerError.includes("etimedout") ||
+    lowerError.includes("enotfound") ||
+    lowerError.includes("connection error") ||
+    lowerError.includes("timeout") ||
+    lowerError.includes("timed out") ||
+    lowerError.includes("connect");
 
   if (isFastFailError) {
     // Short cooldown for connection errors (5 seconds)
@@ -2902,7 +3665,7 @@ function resolveSummaryModel(
     }
   }
 
-  console.warn(`[pi-router] Configured summaryModel not found: ${configuredSummaryModel}; using target model`);
+  debugLog(`[pi-router] Configured summaryModel not found: ${configuredSummaryModel}; using target model`);
   return targetModel;
 }
 
@@ -2931,9 +3694,7 @@ async function tryModelFallback(
       "",
     ];
 
-    recentFailures.forEach(f => {
-      errorLines.push(`  • ${f.channel}: ${f.error}`);
-    });
+    errorLines.push(...formatUserFacingFailureList(recentFailures));
 
     errorLines.push("");
     errorLines.push("Tried channels: " + modelConfig.channels.join(", "));
@@ -2945,9 +3706,10 @@ async function tryModelFallback(
     errorLines.push("  3. Configure fallback models in pi-router.json");
 
     const errorMsg = errorLines.join("\n");
-    console.error(errorMsg);
+    debugLog(errorMsg);
 
     debugLog(`[pi-router] No fallback models configured for ${modelId}`);
+    eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, errorMsg));
     eventStream.end();
     return;
   }
@@ -2966,7 +3728,7 @@ async function tryModelFallback(
       const targetModel = modelMap.get(key);
       
       if (!targetModel) {
-        console.warn(`[pi-router] Fallback model not found: ${key}`);
+        debugLog(`[pi-router] Fallback model not found: ${key}`);
         continue;
       }
       
@@ -2975,7 +3737,7 @@ async function tryModelFallback(
       const primaryModel = modelMap.get(primaryKey);
       
       if (!primaryModel) {
-        console.warn(`[pi-router] Primary model not found for context transfer: ${primaryKey}`);
+        debugLog(`[pi-router] Primary model not found for context transfer: ${primaryKey}`);
         continue;
       }
       
@@ -3021,7 +3783,7 @@ async function tryModelFallback(
             );
             debugLog(`[pi-router] Context summary generated (${summaryResult.tokensUsed || 0} tokens)`);
           } else {
-            console.warn(`[pi-router] Summary generation failed, using full context`);
+            debugLog(`[pi-router] Summary generation failed, using full context`);
             modifiedContext = sanitizeContextForSwitch(
               context,
               primaryModel,
@@ -3042,10 +3804,16 @@ async function tryModelFallback(
       // Try to forward to fallback model
       try {
         debugLog(`[pi-router] Forwarding to fallback ${key}...`);
-        fallbackStream = forwardToProvider(targetModel, modifiedContext, options);
+        updateFooterStatus(modelId, channel, fallbackSpec.id, "fallback");
+        fallbackStream = forwardToProvider(targetModel, modifiedContext, options, config);
         
-        // Forward events
+        // Forward events; provider-level failures are emitted as error events,
+        // not thrown exceptions, so convert them back into a failed attempt.
         for await (const event of fallbackStream) {
+          const failure = getStreamEventFailure(event);
+          if (failure) {
+            throw new Error(failure);
+          }
           eventStream.push(event);
         }
         
@@ -3053,7 +3821,9 @@ async function tryModelFallback(
         debugLog(`[pi-router] Successfully failed over to ${key}`);
         return;
       } catch (err) {
-        console.error(`[pi-router] Fallback failed on ${key}:`, err);
+        const error = err instanceof Error ? err.message : String(err);
+        debugLog(`[pi-router] Fallback failed on ${key}:`, err);
+        updateFooterStatus(modelId, channel, fallbackSpec.id, "failed", undefined, error);
         // Continue to next channel/model
       }
     }
@@ -3063,25 +3833,35 @@ async function tryModelFallback(
   const failures = routerState.lastFailures.get(modelId) || [];
   const recentFailures = failures.slice(-10); // Last 10 failures
 
-  console.error(`[pi-router] ═══════════════════════════════════════════════════`);
-  console.error(`[pi-router] All channels exhausted for ${modelId}`);
-  console.error(`[pi-router] ═══════════════════════════════════════════════════`);
-  console.error(`[pi-router] Configured channels: ${modelConfig.channels.join(", ")}`);
-  console.error(`[pi-router] Recent failures (${recentFailures.length}):`);
+  debugLog(`[pi-router] ═══════════════════════════════════════════════════`);
+  debugLog(`[pi-router] All channels exhausted for ${modelId}`);
+  debugLog(`[pi-router] ═══════════════════════════════════════════════════`);
+  debugLog(`[pi-router] Configured channels: ${modelConfig.channels.join(", ")}`);
+  debugLog(`[pi-router] Recent failures (${recentFailures.length}):`);
   recentFailures.forEach((f, i) => {
     const errPreview = f.error.substring(0, 80);
-    console.error(`[pi-router]   ${i + 1}. ${f.channel}: ${errPreview}`);
+    debugLog(`[pi-router]   ${i + 1}. ${f.channel}: ${errPreview}`);
   });
 
   if (!modelConfig.fallbackModels || modelConfig.fallbackModels.length === 0) {
-    console.error(`[pi-router] No fallback models configured`);
-    console.error(`[pi-router] Hint: Add fallbackModels in pi-router.json or run /router config wizard`);
+    debugLog(`[pi-router] No fallback models configured`);
+    debugLog(`[pi-router] Hint: Add fallbackModels in pi-router.json or run /router config wizard`);
   } else {
-    console.error(`[pi-router] Fallback models also failed: ${modelConfig.fallbackModels.map(f => f.id).join(", ")}`);
+    debugLog(`[pi-router] Fallback models also failed: ${modelConfig.fallbackModels.map(f => f.id).join(", ")}`);
   }
 
-  console.error(`[pi-router] Run '/router explain' for detailed diagnostics`);
-  console.error(`[pi-router] ═══════════════════════════════════════════════════`);
+  debugLog(`[pi-router] Run '/router explain' for detailed diagnostics`);
+  debugLog(`[pi-router] ═══════════════════════════════════════════════════`);
+
+  const finalErrorMsg = [
+    `[pi-router] All channels and fallback models failed for ${modelId}.`,
+    `Configured channels: ${modelConfig.channels.join(", ")}`,
+    recentFailures.length > 0 ? "Recent failures:\n" + recentFailures.map((f, i) => `  ${i + 1}. ${f.channel}: ${formatUserFacingFailure(f.error)}`).join("\n") : "Recent failures: none recorded",
+    `Fallback models: ${modelConfig.fallbackModels?.map(f => f.id).join(", ") || "none"}`,
+    "Run '/router explain' for detailed diagnostics.",
+  ].join("\n");
+
+  eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, finalErrorMsg));
   eventStream.end();
 }
 
@@ -3594,6 +4374,7 @@ async function probeChannel(
     // Forward to provider with timeout
     const stream = forwardToProvider(targetModel, probeContext, {
       timeoutMs: healthProber.timeoutMs,
+      maxRetries: 0,
     });
     
     // Wait for first event
@@ -3631,17 +4412,17 @@ async function probeChannel(
   } catch (err) {
     const latencyMs = Date.now() - startTime;
     
-    // Record failure
+    // Record failure in the probe-only diagnostics. Do not mark the main
+    // routing health/circuit breaker as failed: health probes are best-effort
+    // and can be false negatives for providers that reject `ping`, have cold
+    // starts, or need longer than the probe timeout. Real user traffic is the
+    // source of truth for failover health.
     healthProber.lastProbe.set(key, {
       channel,
       success: false,
       error: String(err),
       timestamp: Date.now(),
     });
-    
-    // Update health status and circuit breaker
-    updateHealthStatus(modelId, channel, false);
-    recordCircuitOutcome(modelId, channel, false);
     
     debugLog(`[pi-router] Probe ${key} failed (${latencyMs}ms): ${err}`);
   }
@@ -3672,19 +4453,34 @@ function __testResetInternalState(): void {
   routerState.activeChannels.clear();
   routerState.cooldowns.clear();
   routerState.lastFailures.clear();
+  routerState.currentUi = undefined;
+  routerState.currentTheme = undefined;
+  routerState.currentModel = undefined;
+  routerState.currentModelProvider = undefined;
+  routerState.currentThinkingLevel = undefined;
+  routerState.currentSessionManager = undefined;
+  routerState.currentGetContextUsage = undefined;
+  routerState.currentModelRegistry = undefined;
+  routerState.customFooterInstalled = undefined;
+  routerState.customFooterEnabled = undefined;
+  routerState.lastStatusUpdate = undefined;
   latencyTracker.records.clear();
   healthChecker.status.clear();
   circuitBreaker.circuits.clear();
   healthProber.lastProbe.clear();
+  decisionLogger.decisions.length = 0;
 }
 
 function __testGetInternalState() {
   return {
+    activeChannels: routerState.activeChannels,
     cooldowns: routerState.cooldowns,
     failures: routerState.lastFailures,
     latencies: latencyTracker.records,
     health: healthChecker.status,
     circuits: circuitBreaker.circuits,
+    lastStatusUpdate: routerState.lastStatusUpdate,
+    decisions: decisionLogger.decisions,
   };
 }
 
@@ -3706,6 +4502,14 @@ export {
   updateHealthStatus,
   canAttemptChannel,
   recordCircuitOutcome,
+  updateFooterStatus,
+  formatFooterStatus,
+  formatRightAlignedStatusLine,
+  applyRouterRequestOptions,
+  getStreamEventFailure,
+  isAbortError,
+  createMirrorModels,
+  createFailoverStream,
   __testResetInternalState,
   __testGetInternalState,
 };
