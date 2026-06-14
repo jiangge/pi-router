@@ -77,9 +77,17 @@ type RouterConfig = {
     probeMessage?: string;
   };
   footer?: {
-    /** Keep route status on the built-in third status line. */
+    /**
+     * Default true. When the replacement footer is disabled, keep route status
+     * on pi's built-in extension status line. Set false to suppress that
+     * fallback status item.
+     */
     statusLine?: boolean;
-    /** Replace pi's built-in footer and right-align route status on the model line. */
+    /**
+     * Default true. pi-router replaces pi's built-in footer while router
+     * status is active so the route can be right-aligned with other extension
+     * statuses. Set false to keep pi's built-in footer layout.
+     */
     rightAlignRoute?: boolean;
   };
 };
@@ -803,6 +811,7 @@ function setCurrentRouterConfig(config: RouterConfig): RouterConfig {
   currentRouterConfig = config;
   autoSyncConfig = config;
   routerState.customFooterEnabled = config.footer?.rightAlignRoute !== false;
+  routerState.footerStatusLineEnabled = config.footer?.statusLine !== false;
   return config;
 }
 
@@ -893,6 +902,8 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
     _comment_2: "配置文件路径: ~/.pi/agent/pi-router.json；修改后运行 /reload 或重启 pi 生效。",
     _comment_strategy: "路由策略: channelFirst(通道优先) / custom(自定义顺序)",
     strategy: config.strategy ?? "channelFirst",
+    _comment_auto: "是否注册 router/auto 并在无 models 时自动发现多通道模型",
+    auto: config.auto ?? true,
     _comment_sortBy: "排序策略: latency(延迟) / capabilityFirst(能力) / cost(成本) / manual(手动)",
     sortBy: config.sortBy ?? "latency",
     _comment_autoSync: "自动同步: true=从 models.json 自动发现多通道模型；false=手动维护 models",
@@ -902,10 +913,17 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
     healthProbe: config.healthProbe ?? { enabled: false },
     _comment_sticky: "粘性模式: true=优先复用上次成功通道，提高缓存命中率",
     sticky: config.sticky ?? true,
+    ...(config.stickyRecords && Object.keys(config.stickyRecords).length > 0
+      ? { _comment_stickyRecords: "运行时粘性路由记录，由 pi-router 自动维护", stickyRecords: config.stickyRecords }
+      : {}),
     _comment_models: "模型配置: channels 从左到右依次尝试；fallbackModels 为模型级降级链",
     models: config.models ?? [],
     _comment_customOrder: "自定义顺序(仅 custom 策略): model@channel 二元组数组，按此顺序尝试",
     ...(config.customOrder ? { customOrder: config.customOrder } : {}),
+    ...(config.request ? { _comment_request: "请求控制: timeoutMs / maxRetries / maxRetryDelayMs / maxTokens", request: config.request } : {}),
+    _comment_footer: "底部状态栏: rightAlignRoute 默认 true(替换 footer 并右对齐路由状态)；statusLine 默认 true(禁用替换时仍显示简短状态)",
+    footer: config.footer ?? { rightAlignRoute: true, statusLine: true },
+    ...(config.intent ? { intent: config.intent } : {}),
     _comment_advanced: "高级配置，通常不需要手动修改",
     failover: config.failover ?? {
       on: ["ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND"],
@@ -950,10 +968,14 @@ function writeConfigReadme(configPath: string): void {
 ### 关键字段
 
 - \`strategy\`: \`channelFirst\` 或 \`custom\`
+- \`auto\`: 是否注册 \`router/auto\` 并支持首次自动发现
 - \`sortBy\`: \`latency\` / \`capabilityFirst\` / \`cost\` / \`manual\`
 - \`autoSync\`: 是否从 models.json 自动同步多通道模型
 - \`healthProbe.enabled\`: 是否启用健康探测
 - \`sticky\`: 是否优先复用上次成功通道
+- \`request\`: 请求超时、重试与 maxTokens 控制
+- \`footer.rightAlignRoute\`: 默认 true；设为 false 可保留 pi 内置 footer
+- \`footer.statusLine\`: 默认 true；仅在禁用替换 footer 时控制简短状态项
 - \`summaryMaxTokens\`: AI 摘要目标上限（默认 2000）
 - \`models[].channels\`: 通道尝试顺序，从左到右
 
@@ -1556,6 +1578,12 @@ function applyFooterStatus(): void {
     return;
   }
 
+  if (routerState.footerStatusLineEnabled === false) {
+    ui.setStatus?.("pi-router", undefined);
+    ui.setStatus?.("pi-router-right", undefined);
+    return;
+  }
+
   if (ui.setStatus) {
     ui.setStatus("pi-router", formatFooterStatus(routerState.currentTheme, status));
     ui.setStatus("pi-router-right", undefined);
@@ -1650,6 +1678,7 @@ export default function (pi: ExtensionAPI) {
   // active. Users can opt out with footer.rightAlignRoute = false if another
   // extension should keep the built-in footer layout.
   routerState.customFooterEnabled = config.footer?.rightAlignRoute !== false;
+  routerState.footerStatusLineEnabled = config.footer?.statusLine !== false;
   const updateFooterContext = (ctx: any) => {
     refreshFooterContext(ctx, typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined);
   };
@@ -2566,6 +2595,7 @@ type RouterState = {
   currentModelRegistry?: any;
   customFooterInstalled?: boolean;
   customFooterEnabled?: boolean;
+  footerStatusLineEnabled?: boolean;
   lastStatusUpdate?: {
     modelId: string;           // router model ID (e.g., "claude-fable-5" or "auto")
     channel: string;           // actual channel used (e.g., "lan")
@@ -4768,6 +4798,7 @@ function __testResetInternalState(): void {
   routerState.currentModelRegistry = undefined;
   routerState.customFooterInstalled = undefined;
   routerState.customFooterEnabled = undefined;
+  routerState.footerStatusLineEnabled = undefined;
   routerState.lastStatusUpdate = undefined;
   latencyTracker.records.clear();
   healthChecker.status.clear();
@@ -4823,6 +4854,10 @@ function __testLoadConfig(): RouterConfig {
   const config = loadConfig();
   configFileMtimeMs = getFileMtimeMs(getRouterConfigPath());
   return setCurrentRouterConfig(config);
+}
+
+function __testSaveConfig(config: RouterConfig): void {
+  saveConfig(config);
 }
 
 function __testRefreshConfigFromDisk(): RouterConfig {
@@ -4885,6 +4920,7 @@ export {
   __testSetPiConfigDir,
   __testLoadModelsJson,
   __testLoadConfig,
+  __testSaveConfig,
   __testRefreshConfigFromDisk,
   __testGetCachedModelMap,
   __testCalculateFileHash,

@@ -283,9 +283,20 @@ custom:       按 customOrder 中显式配置的 model@channel 顺序尝试
 ```json
 {
   "strategy": "channelFirst",
+  "auto": true,
   "sortBy": "latency",
   "autoSync": true,
   "sticky": true,
+  "request": {
+    "timeoutMs": 120000,
+    "maxRetries": 0,
+    "maxRetryDelayMs": 1000,
+    "maxTokens": 32768
+  },
+  "footer": {
+    "rightAlignRoute": true,
+    "statusLine": true
+  },
   "contextTransfer": "summary",
   "summaryModel": "optional-summary-model",
   "summaryPrompt": "optional custom prompt",
@@ -301,6 +312,13 @@ custom:       按 customOrder 中显式配置的 model@channel 顺序尝试
   }
 }
 ```
+
+Footer 默认行为：
+
+- `footer.rightAlignRoute` 默认 `true`：当 router 状态活跃时，pi-router 会替换 pi 的 footer，以便右对齐路由状态
+- 将 `footer.rightAlignRoute` 设为 `false` 可保留 pi 内置 footer 布局
+- `footer.statusLine` 默认 `true`：禁用替换 footer 时，pi-router 仍会显示简短的内置状态项
+- 将 `footer.statusLine` 设为 `false` 可关闭该 fallback 状态项
 
 ### 摘要 AI 的默认行为
 

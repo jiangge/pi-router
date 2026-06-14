@@ -5,6 +5,18 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-14
+
+### Fixed
+
+- **Config preservation**: `saveConfig()` now preserves advanced fields (`auto`, `request`, `footer`, `stickyRecords`, `intent`) when writing JSON-safe comments, preventing manual options and sticky routing state from being dropped during config saves.
+- **Footer options**: Clarified that `footer.rightAlignRoute` defaults to enabled and implemented `footer.statusLine=false` for suppressing the built-in status-line fallback when footer replacement is disabled.
+
+### Documentation
+
+- Documented `request` and `footer` global options in English and Chinese READMEs.
+- Generated `pi-router.README.md` now explains `auto`, `request`, and footer defaults for manual config editing.
+
 ## [0.3.0] - 2026-06-14
 
 ### Fixed

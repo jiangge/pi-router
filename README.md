@@ -283,9 +283,20 @@ When switching models:
 ```json
 {
   "strategy": "channelFirst",
+  "auto": true,
   "sortBy": "latency",
   "autoSync": true,
   "sticky": true,
+  "request": {
+    "timeoutMs": 120000,
+    "maxRetries": 0,
+    "maxRetryDelayMs": 1000,
+    "maxTokens": 32768
+  },
+  "footer": {
+    "rightAlignRoute": true,
+    "statusLine": true
+  },
   "contextTransfer": "summary",
   "summaryModel": "optional-summary-model",
   "summaryPrompt": "optional custom prompt",
@@ -301,6 +312,13 @@ When switching models:
   }
 }
 ```
+
+Footer defaults:
+
+- `footer.rightAlignRoute` defaults to `true`: while router status is active, pi-router replaces pi's footer so route status can be right-aligned
+- set `footer.rightAlignRoute` to `false` to keep pi's built-in footer layout
+- `footer.statusLine` defaults to `true`: when the replacement footer is disabled, pi-router still shows a short built-in status item
+- set `footer.statusLine` to `false` to suppress that fallback status item
 
 ### Summary AI Behavior
 

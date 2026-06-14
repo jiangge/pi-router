@@ -13,6 +13,7 @@ import {
   __testLoadModelsJson,
   __testRefreshConfigFromDisk,
   __testResetInternalState,
+  __testSaveConfig,
   __testSetPiConfigDir,
 } from '../index.js';
 
@@ -106,6 +107,30 @@ describe('Performance Optimizations', () => {
     expect(refreshed.strategy).toBe('custom');
     expect(refreshed.models?.[0]?.channels).toEqual(['b']);
     expect(refreshed.customOrder).toEqual(['m1@b']);
+  });
+
+  it('preserves advanced config fields when saving comments', () => {
+    const configPath = path.join(testDir, 'pi-router.json');
+    const config = {
+      strategy: 'channelFirst',
+      auto: false,
+      models: [{ id: 'm1', channels: ['a'] }],
+      request: { timeoutMs: 1234, maxRetries: 2, maxRetryDelayMs: 99, maxTokens: 456 },
+      footer: { rightAlignRoute: false, statusLine: false },
+      stickyRecords: {
+        m1: { modelId: 'm1', channel: 'a', successCount: 3, lastSuccess: 10, lastUpdate: 20 },
+      },
+      intent: 'auto',
+    } as any;
+
+    __testSaveConfig(config);
+    const saved = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+    expect(saved.auto).toBe(false);
+    expect(saved.request).toEqual(config.request);
+    expect(saved.footer).toEqual(config.footer);
+    expect(saved.stickyRecords).toEqual(config.stickyRecords);
+    expect(saved.intent).toBe('auto');
   });
 
   it('defers health probes to avoid blocking startup', () => {
