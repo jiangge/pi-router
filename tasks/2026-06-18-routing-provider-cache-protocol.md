@@ -1,7 +1,7 @@
 # Task: Generic routing-provider cache protocol for pi-router
 
 Date: 2026-06-18
-Status: implemented in pi-router; companion pi-cache-optimizer implementation still pending
+Status: implemented in pi-router; companion pi-cache-optimizer task completed and archived
 
 ## Background
 
@@ -174,10 +174,16 @@ npm test
 
 All passed.
 
-Remaining cross-repo work:
+Companion pi-cache-optimizer status:
 
-- Implement/validate the companion `pi-cache-optimizer` consumer side of the generic protocol.
-- Run an end-to-end manual route such as `router/deepseek-v4-flash -> wx-api/oc/deepseek-v4-flash-free` and confirm cache stats are keyed by the upstream provider/model.
+- The companion task is archived as completed at `/home/jiang/jiang/source/pi-cache-optimizer/.trellis/tasks/archive/2026-06/06-18-06-18-routing-provider-cache-protocol/`.
+- The companion implementation landed in pi-cache-optimizer commit `e07ccda` (`feat: add routing provider cache protocol`).
+- Verified current pi-cache-optimizer type safety with `./node_modules/.bin/tsc --noEmit`.
+- The archived verifier expects `bun`, which is not installed in this environment, so that script was not rerun here.
+
+Optional manual validation before release:
+
+- Run an end-to-end route such as `router/deepseek-v4-flash -> wx-api/oc/deepseek-v4-flash-free` and confirm cache stats are keyed by the upstream provider/model.
 
 ## pi-router implementation responsibilities
 
