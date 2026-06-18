@@ -4,6 +4,7 @@ import { visibleWidth } from '@earendil-works/pi-tui';
 import {
   __testGetInternalState,
   __testResetInternalState,
+  __testRegisterRoutingAdapter,
   canAttemptChannel,
   createFailoverStream,
   createMirrorModels,
@@ -38,6 +39,7 @@ import {
 
 afterEach(() => {
   __testResetInternalState();
+  delete (globalThis as any)[Symbol.for('pi.cache.hints.v1')];
 });
 
 describe('routing core helpers', () => {
@@ -375,6 +377,65 @@ describe('provider registration helpers', () => {
     expect(mirrors.every((m: any) => m.api === 'pi-router')).toBe(true);
   });
 
+  it('uses per-channel upstream model ids for canonical router mirror defaults', () => {
+    const mirrors = createMirrorModels(
+      [
+        {
+          id: 'deepseek-v4-flash',
+          aliases: ['DeepSeek-V4-Flash', 'oc/deepseek-v4-flash-free'],
+          channels: ['wx-api', 'abrdns-ds'],
+          modelByChannel: {
+            'wx-api': 'oc/deepseek-v4-flash-free',
+            'abrdns-ds': 'DeepSeek-V4-Flash',
+          },
+        },
+      ] as any,
+      new Map([
+        ['oc/deepseek-v4-flash-free@wx-api', { id: 'oc/deepseek-v4-flash-free', name: 'DeepSeek Flash Free', provider: 'wx-api', api: 'openai-completions', contextWindow: 123 }],
+        ['DeepSeek-V4-Flash@abrdns-ds', { id: 'DeepSeek-V4-Flash', name: 'DeepSeek Flash', provider: 'abrdns-ds', api: 'openai-completions', contextWindow: 456 }],
+      ]) as any,
+    );
+
+    const mirror = mirrors.find((m: any) => m.id === 'deepseek-v4-flash');
+    expect(mirror).toMatchObject({
+      id: 'deepseek-v4-flash',
+      name: 'DeepSeek Flash Free (router)',
+      contextWindow: 123,
+      api: 'pi-router',
+    });
+  });
+
+  it('folds configured aliases into sync diffs with upstream model overrides', () => {
+    const diff = detectModelChanges(
+      {
+        models: [
+          {
+            id: 'deepseek-v4-flash',
+            aliases: ['DeepSeek-V4-Flash', 'oc/deepseek-v4-flash-free'],
+            channels: ['deepseek', 'abrdns-ds'],
+            modelByChannel: { 'abrdns-ds': 'DeepSeek-V4-Flash' },
+          },
+        ],
+      } as any,
+      [
+        { id: 'deepseek-v4-flash', provider: 'deepseek' } as any,
+        { id: 'DeepSeek-V4-Flash', provider: 'abrdns-ds' } as any,
+        { id: 'oc/deepseek-v4-flash-free', provider: 'wx-api' } as any,
+      ],
+    );
+
+    expect(diff.added).toEqual([]);
+    expect(diff.removed).toEqual([]);
+    expect(diff.modified).toEqual([
+      {
+        id: 'deepseek-v4-flash',
+        channelsAdded: ['wx-api'],
+        channelsRemoved: [],
+        propsChanged: ['modelByChannel'],
+      },
+    ]);
+  });
+
   it('lets explicit provider models override provider-level headers and compat', () => {
     const models = expandProviderModels('custom-provider', {
       api: 'custom-api',
@@ -502,6 +563,120 @@ describe('request and event helpers', () => {
       maxRetryDelayMs: 789,
     });
     expect(configured?.timeoutMs).toBeUndefined();
+  });
+
+  it('routes canonical aliases to upstream ids, publishes route snapshots, and forwards cache hints', async () => {
+    const calls: any[] = [];
+    const hintInputs: any[] = [];
+
+    (globalThis as any)[Symbol.for('pi.cache.hints.v1')] = {
+      version: 1,
+      getHints(input: any) {
+        hintInputs.push(input);
+        // First-turn router integrations may only have a virtual-model hint before
+        // pi-router selects the real upstream provider/model. Exact upstream lookup
+        // should miss, then virtual-only fallback should still deliver the hint.
+        if (input.upstreamProvider) return undefined;
+        return {
+          systemPrompt: 'optimized system prompt',
+          promptCacheKey: 'cache-session-key',
+          cacheRetention: 'long',
+        };
+      },
+    };
+
+    __testRegisterRoutingAdapter();
+
+    registerApiProvider({
+      api: 'pi-router-alias-route-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model, context, options) => {
+        calls.push({ model, context, options });
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          const message = {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'ok' }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 1,
+              output: 1,
+              cacheRead: 2,
+              cacheWrite: 0,
+              totalTokens: 4,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: 'stop',
+            timestamp: Date.now(),
+          } as any;
+          stream.push({ type: 'text_delta', contentIndex: 0, delta: 'ok', partial: message } as any);
+          stream.push({ type: 'done', reason: 'stop', message } as any);
+          stream.end();
+        });
+        return stream;
+      },
+    } as any, 'pi-router-alias-route-test');
+
+    const stream = createFailoverStream(
+      'deepseek-v4-flash',
+      ['wx-api'],
+      { systemPrompt: 'original prompt', messages: [] } as any,
+      undefined,
+      {} as any,
+      {
+        id: 'deepseek-v4-flash',
+        aliases: ['oc/deepseek-v4-flash-free'],
+        channels: ['wx-api'],
+        modelByChannel: { 'wx-api': 'oc/deepseek-v4-flash-free' },
+      } as any,
+      new Map([
+        ['oc/deepseek-v4-flash-free@wx-api', { id: 'oc/deepseek-v4-flash-free', name: 'DeepSeek Flash Free', provider: 'wx-api', api: 'pi-router-alias-route-test-api' }],
+      ]) as any,
+    );
+
+    const events: any[] = [];
+    for await (const event of stream) {
+      events.push(event);
+    }
+
+    expect(calls[0].model).toMatchObject({
+      id: 'oc/deepseek-v4-flash-free',
+      provider: 'wx-api',
+      api: 'pi-router-alias-route-test-api',
+    });
+    expect(calls[0].context.systemPrompt).toBe('optimized system prompt');
+    expect(calls[0].options).toMatchObject({
+      sessionId: 'cache-session-key',
+      cacheRetention: 'long',
+    });
+    expect(hintInputs[0]).toMatchObject({
+      virtualProvider: 'router',
+      virtualModelId: 'deepseek-v4-flash',
+      upstreamProvider: 'wx-api',
+      upstreamModelId: 'oc/deepseek-v4-flash-free',
+      api: 'pi-router-alias-route-test-api',
+    });
+    expect(hintInputs[1]).toMatchObject({
+      virtualProvider: 'router',
+      virtualModelId: 'deepseek-v4-flash',
+    });
+    expect(hintInputs[1].upstreamProvider).toBeUndefined();
+    expect(events.at(-1)?.message).toMatchObject({
+      provider: 'wx-api',
+      model: 'oc/deepseek-v4-flash-free',
+    });
+
+    const router = (globalThis as any)[Symbol.for('pi.routing.registry.v1')]?.getRouter('router');
+    expect(router?.resolveActiveRoute('deepseek-v4-flash')).toMatchObject({
+      virtualProvider: 'router',
+      virtualModelId: 'deepseek-v4-flash',
+      canonicalModelId: 'deepseek-v4-flash',
+      provider: 'wx-api',
+      modelId: 'oc/deepseek-v4-flash-free',
+      status: 'success',
+    });
   });
 
   it('uses a short cooldown for fast connection failures', () => {

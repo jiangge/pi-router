@@ -1,7 +1,591 @@
 {
   "schema_version": 1,
-  "rebuilt_at": "2026-06-14T08:30:34Z",
+  "rebuilt_at": "2026-06-18T09:04:46Z",
   "main_branch": "master",
-  "main_head": "d23c4e83e8591f5a001ad57de7673504c2f56de4",
-  "intents": null
+  "main_head": "afde2f352a6aa5de12eb3b96d90af2dbc1dd48f8",
+  "intents": [
+    {
+      "intent_id": "int_95ecb461",
+      "schema_version": 1,
+      "status": "merged",
+      "status_evidence": {
+        "sealed_event_id": "evt_858a8853",
+        "merged_main_commit": "afde2f352a6aa5de12eb3b96d90af2dbc1dd48f8",
+        "merged_via": "pin",
+        "worktree_status": "dirty",
+        "sealed_at_branch": "master"
+      },
+      "publication": "published",
+      "actor_id": "actor_4fc3b82f",
+      "actor_name": "Jiang Ge",
+      "thread": "master",
+      "git_branch": "master",
+      "goal": "发布 pi-router 0.3.2",
+      "sealed_at": "2026-06-14T16:48:32Z",
+      "base_commit": "1f6fa54b068919888d8537355ffc5d7cf1a10ad9",
+      "code_commit": "afde2f352a6aa5de12eb3b96d90af2dbc1dd48f8",
+      "summary": {
+        "title": "发布 pi-router 0.3.2",
+        "what": "为 pi-router 执行补丁版本发布准备：将包版本从 0.3.1 提升到 0.3.2，更新 package.json 与 package-lock.json，更新 index.ts 中对外显示的版本字符串，并在 CHANGELOG.md 增加 0.3.2 发布说明。随后完成发布前校验，为 git push 与 npm publish 做好准备。",
+        "why": "npm registry 上已经存在 pi-router@0.3.1，不能重复发布同版本。为了交付本轮补测与修复成果，需要创建一个新的可发布补丁版本。",
+        "user_goal": "发布 pi-router 0.3.2",
+        "decisions": [
+          {
+            "point": "发布版本号",
+            "chose": "将版本提升为 0.3.2",
+            "rationale": "0.3.1 已经在 npm 上存在，同版本 publish 会失败；本轮变更属于向后兼容的补丁发布。",
+            "rejected": [
+              "继续尝试发布 0.3.1"
+            ]
+          },
+          {
+            "point": "发布前验证范围",
+            "chose": "执行 typecheck、build、全量测试和 dry-run 打包检查",
+            "rationale": "这是最小但足够的发布前验证集合，可以同时确认源码、测试与 npm 包内容一致可用。"
+          }
+        ],
+        "rejected": [
+          {
+            "alternative": "在不改版本号的情况下直接 npm publish",
+            "reason": "registry 已有 0.3.1，发布会被拒绝。"
+          }
+        ],
+        "acknowledged_constraints": [
+          {
+            "constraint_id": "delivery-explicit-request",
+            "disposition": "preserved",
+            "note": "本次 push 与 package publish 均来自用户明确要求，而非代理自主越界执行。"
+          }
+        ],
+        "review_notes": [
+          "发布前检查通过：npm run typecheck、npm run build、npm test -- --run（64 passed）、npm pack --dry-run --json。",
+          "本 intent 与之前的 router 修复/补测 intents 存在共享文件 overlap，但语义上是对已完成成果进行补丁版本发布，属于后续交付动作。"
+        ]
+      },
+      "fingerprint": {
+        "subsystems": [
+          "release",
+          "package metadata",
+          "user-facing version strings",
+          "changelog"
+        ],
+        "files_touched": [
+          "CHANGELOG.md",
+          "index.ts",
+          "package-lock.json",
+          "package.json"
+        ],
+        "architectural_claims": [],
+        "behavioral_changes": [
+          "对外发布版本号由 0.3.1 变为 0.3.2。"
+        ],
+        "api_changes": [],
+        "data_model_changes": [
+          {
+            "kind": "modified",
+            "name": "package version",
+            "location": "package.json / package-lock.json",
+            "compatibility": "compatible",
+            "migration_required": false,
+            "migration_notes": "仅补丁版本提升，无配置迁移要求。"
+          }
+        ],
+        "security_implications": [],
+        "migration_notes": [
+          "无迁移要求；消费者升级到 0.3.2 即可获得本轮修复与测试覆盖。"
+        ],
+        "tags": [
+          "release",
+          "npm",
+          "version-bump",
+          "changelog"
+        ]
+      },
+      "view_rebuilt_at": "2026-06-18T09:04:46Z"
+    },
+    {
+      "intent_id": "int_02cc3872",
+      "schema_version": 1,
+      "status": "merged",
+      "status_evidence": {
+        "sealed_event_id": "evt_2e5487c9",
+        "merged_main_commit": "43af32500042dcc79c243ca95139fe29db1a7c52",
+        "merged_via": "pin",
+        "worktree_status": "untracked",
+        "sealed_at_branch": "master"
+      },
+      "publication": "published",
+      "actor_id": "actor_4fc3b82f",
+      "actor_name": "Jiang Ge",
+      "thread": "master",
+      "git_branch": "master",
+      "goal": "整理并提交 pi-router 路由修复",
+      "sealed_at": "2026-06-14T13:29:36Z",
+      "base_commit": "d23c4e83e8591f5a001ad57de7673504c2f56de4",
+      "code_commit": "43af32500042dcc79c243ca95139fe29db1a7c52",
+      "summary": {
+        "title": "整理并提交 pi-router 路由修复",
+        "what": "完成 pi-router 的路由可靠性、配置向导、缓存、打包与文档收口：接入真实 provider streamSimple 与上游鉴权，增强 channelFirst/custom 路由、auto router、sticky、footer、/router config order、OAuth/modelOverrides 发现、候选过滤、fallback 摘要与健康/熔断观测，并根据深度审查补齐配置热刷新、fallback relay 缓冲、mtime 缓存失效、peerDependencies 和发布清单修复。",
+        "why": "用户需要 pi-router 在真实 pi 运行时稳定代理多 provider 模型并能快速调整路由顺序，同时避免旧配置闭包、未登录 provider 混入、fallback 半截输出泄露、核心 pi 包副本分裂和 npm 包缺源文件等问题。",
+        "user_goal": "整理并提交 pi-router 路由修复",
+        "decisions": [
+          {
+            "point": "router provider dispatch 与上游鉴权",
+            "chose": "使用专用 pi-router API 触发自定义 streamSimple，并在转发真实 provider 前剥离 router dummy apiKey、通过 modelRegistry 解析真实 auth/header。",
+            "rationale": "避免 router 伪 provider 递归或把 dummy key 传给上游导致 401，同时保留 pi-ai provider registry 的真实流式能力。",
+            "rejected": [
+              "直接把 router provider 当普通上游 provider 透传"
+            ]
+          },
+          {
+            "point": "配置刷新与缓存策略",
+            "chose": "维护单一当前配置引用，save/refresh/命令/路由入口共用，并让 models/auth/modelMap 缓存按 mtime 与 TTL 失效。",
+            "rationale": "跨终端修改 pi-router.json 或 models.json 后，同一进程内的命令和实际路由必须尽快看到新顺序、新渠道和认证状态。",
+            "rejected": [
+              "继续依赖启动时闭包 config",
+              "仅使用固定 60 秒 TTL 判断模型缓存"
+            ]
+          },
+          {
+            "point": "fallback 流式行为",
+            "chose": "fallback 模型复用主链路 relayProviderStream 的缓冲/commit 语义。",
+            "rationale": "未提交事件失败时可以安全尝试下一个 fallback；一旦内容已提交，就不再混入其他模型输出。",
+            "rejected": [
+              "fallback 直接 for-await 后立即 push 每个上游事件"
+            ]
+          },
+          {
+            "point": "footer 默认行为",
+            "chose": "按用户确认保留现有默认启用 rightAlignRoute 的代码行为，仅修正文案注释使其与代码一致。",
+            "rationale": "用户明确说明 footer 当前运行行为正确，审查发现的是注释与代码不一致。",
+            "rejected": [
+              "把默认行为改为 opt-in"
+            ]
+          },
+          {
+            "point": "pi 核心依赖打包",
+            "chose": "将 @earendil-works/pi-ai 与 @earendil-works/pi-tui 放入 peerDependencies，同时保留 devDependencies 供测试。",
+            "rationale": "pi 核心包应由宿主提供，避免扩展安装自己的副本造成 registry/TUI 状态分裂。",
+            "rejected": [
+              "继续把 pi-ai/pi-tui 作为运行时 dependencies"
+            ]
+          }
+        ],
+        "rejected": [],
+        "review_notes": [
+          "验证通过：npm run build、npm test（42 passed）、npm run test:coverage、npm pack --dry-run --json。",
+          "本次最终提交为 43af325 fix: address router review findings；未推送远端，按 handoff 边界停在本地提交。",
+          "仓库当前 .ml-cache/views 会被 Mainline 命令刷新为脏状态，seal 使用 --allow-dirty 仅记录该运行时视图缓存脏状态。"
+        ]
+      },
+      "fingerprint": {
+        "subsystems": [
+          "router provider registration",
+          "stream relay and fallback routing",
+          "config hot reload",
+          "models/auth/modelMap cache",
+          "config wizard ordering",
+          "footer status",
+          "package manifest",
+          "documentation",
+          "tests"
+        ],
+        "files_touched": [
+          ".gitignore",
+          ".mainline/config.toml",
+          ".mainline/local.toml",
+          ".npmignore",
+          "ARCHITECTURE.md",
+          "CHANGELOG.md",
+          "CODE_REVIEW_FIXES.md",
+          "DEVELOPMENT_SUMMARY.md",
+          "ENHANCED_SUMMARY_EXAMPLE.ts",
+          "INSTALL.md",
+          "PERFORMANCE_OPTIMIZATION.md",
+          "PROJECT_SUMMARY.md",
+          "README.md",
+          "README.zh-CN.md",
+          "RELEASE_CHECKLIST.md",
+          "SUMMARY_FALLBACK.md",
+          "TERMINOLOGY.md",
+          "TESTING.md",
+          "config-wizard-flat.ts",
+          "config-wizard-flow.ts",
+          "config-wizard-two-tier.ts",
+          "config-wizard-ui.ts",
+          "config-wizard.ts",
+          "examples/router.config.json",
+          "examples/router.config.minimal.json",
+          "index.ts",
+          "package-lock.json",
+          "package.json",
+          "tests/config-wizard.test.ts",
+          "tests/performance.test.ts",
+          "tests/routing-core.test.ts",
+          "tests/setup.ts",
+          "tsconfig.json",
+          "verify.sh",
+          "vitest.config.ts"
+        ],
+        "architectural_claims": [
+          "pi-router exposes router/auto and router/\u003cmodel\u003e mirror models using a dedicated pi-router API dispatch seam.",
+          "Routing failover uses buffered stream relay semantics so uncommitted upstream events can be discarded safely before trying another channel.",
+          "Configuration and model discovery are process-local cached but invalidated by relevant file mtimes."
+        ],
+        "behavioral_changes": [
+          "router requests and /router commands see refreshed pi-router.json after disk changes.",
+          "fallback routes no longer leak pre-commit start/text_start events from failed fallback streams.",
+          "/router config order preserves configured real channels that are temporarily unavailable while still excluding router pseudo channels.",
+          "summary generation uses the same authenticated upstream forwarding path as normal requests.",
+          "models.json/auth.json changes invalidate model and modelMap caches without waiting for TTL."
+        ],
+        "api_changes": [
+          {
+            "kind": "modified",
+            "surface": "config",
+            "signature": "package.json peerDependencies for @earendil-works/pi-ai and @earendil-works/pi-tui",
+            "compatibility": "compatible"
+          },
+          {
+            "kind": "modified",
+            "surface": "cli",
+            "signature": "/router config order",
+            "compatibility": "compatible"
+          },
+          {
+            "kind": "modified",
+            "surface": "function",
+            "signature": "internal routeRequest/tryModelFallback/test helpers",
+            "compatibility": "compatible"
+          }
+        ],
+        "data_model_changes": [
+          {
+            "kind": "modified",
+            "name": "pi-router.json stickyRecords/current routing config handling",
+            "location": "~/.pi/agent/pi-router.json",
+            "compatibility": "compatible",
+            "migration_required": false,
+            "migration_notes": "Existing config files continue to load; comments and defaults are JSON-safe."
+          },
+          {
+            "kind": "modified",
+            "name": "package-lock peer/dev dependency layout",
+            "location": "package-lock.json",
+            "compatibility": "compatible",
+            "migration_required": false,
+            "migration_notes": "Runtime pi core packages are expected from host peer dependencies; local dev still installs them."
+          }
+        ],
+        "security_implications": [
+          "Dropping the router dummy apiKey before upstream auth prevents accidental credential misuse against real providers.",
+          "Filtering router pseudo providers from model maps/order candidates avoids recursive self-routing."
+        ],
+        "migration_notes": [
+          "Users do not need to rewrite existing pi-router.json configs.",
+          "Package consumers should install under a pi version that satisfies the declared peer dependencies."
+        ],
+        "tags": [
+          "pi-router",
+          "streamSimple",
+          "failover",
+          "fallbackModels",
+          "config refresh",
+          "modelRegistry",
+          "peerDependencies",
+          "config wizard",
+          "router/auto"
+        ]
+      },
+      "view_rebuilt_at": "2026-06-18T09:04:46Z"
+    },
+    {
+      "intent_id": "int_0282dc15",
+      "schema_version": 1,
+      "status": "merged",
+      "status_evidence": {
+        "sealed_event_id": "evt_fa75a51b",
+        "merged_main_commit": "b082bafd10e14020dd29d2531afb612872ae9e75",
+        "merged_via": "pin",
+        "worktree_status": "untracked",
+        "sealed_at_branch": "master"
+      },
+      "publication": "published",
+      "actor_id": "actor_4fc3b82f",
+      "actor_name": "Jiang Ge",
+      "thread": "master",
+      "git_branch": "master",
+      "goal": "继续修复 pi-router 配置持久化与 footer 默认行为文档",
+      "sealed_at": "2026-06-14T15:00:04Z",
+      "base_commit": "1f6fa54b068919888d8537355ffc5d7cf1a10ad9",
+      "code_commit": "b082bafd10e14020dd29d2531afb612872ae9e75",
+      "summary": {
+        "title": "继续修复 pi-router 配置持久化与 footer 默认行为文档",
+        "what": "补齐 pi-router 配置写回与 footer 文档的一致性：保存带 JSON-safe 注释的配置时保留 auto、request、footer、stickyRecords、intent 等高级字段；明确 footer.rightAlignRoute 默认启用并以当前代码行为为准；实现 footer.statusLine=false 对内置状态行 fallback 的抑制；同步 README、README.zh-CN、生成的 pi-router.README.md 字段说明和 CHANGELOG，并新增回归测试覆盖高级配置字段保存。",
+        "why": "上一轮审查修复后仍存在两个容易回归的问题：footer 默认行为的注释/文档不够明确，容易被误改成 opt-in；saveConfig/addConfigComments 在写配置注释时会丢弃高级选项和 sticky 运行时记录，导致用户手动配置或粘性路由状态在后续保存中丢失。",
+        "user_goal": "继续修复 pi-router 配置持久化与 footer 默认行为文档",
+        "decisions": [
+          {
+            "point": "footer 默认行为",
+            "chose": "保留 footer.rightAlignRoute 默认 true 的现有代码行为，只修正文案并补充显式默认说明。",
+            "rationale": "用户明确说明当前运行行为正确，问题在注释与默认语义表达；改代码默认会破坏已验证行为。",
+            "rejected": [
+              "把 footer.rightAlignRoute 改成默认 false 或 opt-in"
+            ]
+          },
+          {
+            "point": "配置写回策略",
+            "chose": "addConfigComments 继续输出 JSON-safe 注释，同时保留 auto、request、footer、stickyRecords、intent 等已知高级字段。",
+            "rationale": "这些字段影响路由注册、请求控制、footer 布局和粘性路由；保存 sticky 或向导结果时不应静默丢失用户配置。",
+            "rejected": [
+              "只保留常用字段并丢弃高级字段"
+            ]
+          },
+          {
+            "point": "footer.statusLine 语义",
+            "chose": "将 statusLine=false 实现为在禁用替换 footer 时抑制内置 setStatus fallback。",
+            "rationale": "类型中已有该字段，之前只有注释没有实际效果；补齐实现后文档、类型与运行行为一致。",
+            "rejected": [
+              "删除 statusLine 字段"
+            ]
+          }
+        ],
+        "rejected": [],
+        "review_notes": [
+          "与既有 proposed intent int_02cc3872 文件/目标重叠；已检查并分类为同一分支上的互补 follow-up，不改变上一轮已确认的 footer 默认行为。",
+          "验证通过：npm run build、npm run typecheck、npm test -- --run（43 passed）、npm run test:coverage、npm pack --dry-run --json。",
+          "提交为 b082baf fix: preserve router config options；未推送远端，按 handoff 边界停止。",
+          "Mainline 运行时 .ml-cache/views 保持脏状态，seal 使用 --allow-dirty 仅记录运行时视图缓存脏状态。"
+        ]
+      },
+      "fingerprint": {
+        "subsystems": [
+          "config persistence",
+          "footer status",
+          "manual config documentation",
+          "tests",
+          "release notes"
+        ],
+        "files_touched": [
+          "CHANGELOG.md",
+          "README.md",
+          "README.zh-CN.md",
+          "index.ts",
+          "tests/performance.test.ts"
+        ],
+        "architectural_claims": [
+          "pi-router config saves are JSON-commented but must preserve behavior-affecting advanced fields.",
+          "footer.rightAlignRoute remains default-enabled; footer.statusLine only controls the built-in status fallback when replacement footer is disabled."
+        ],
+        "behavioral_changes": [
+          "saveConfig preserves auto, request, footer, stickyRecords, and intent when writing pi-router.json.",
+          "footer.statusLine=false now suppresses the built-in pi-router status item when footer replacement is disabled.",
+          "generated pi-router.README.md documents auto, request, and footer defaults for manual editing."
+        ],
+        "api_changes": [
+          {
+            "kind": "modified",
+            "surface": "config",
+            "signature": "footer.statusLine",
+            "compatibility": "compatible"
+          },
+          {
+            "kind": "added",
+            "surface": "function",
+            "signature": "__testSaveConfig(config: RouterConfig): void",
+            "compatibility": "compatible"
+          }
+        ],
+        "data_model_changes": [
+          {
+            "kind": "modified",
+            "name": "pi-router.json persisted config fields",
+            "location": "~/.pi/agent/pi-router.json",
+            "compatibility": "compatible",
+            "migration_required": false,
+            "migration_notes": "Existing configs continue to load; future saves preserve additional known fields instead of dropping them."
+          }
+        ],
+        "security_implications": [],
+        "migration_notes": [
+          "No user migration required.",
+          "Users who previously lost footer/request/sticky settings after a save can re-add them; future saves preserve them."
+        ],
+        "tags": [
+          "pi-router",
+          "pi-router.json",
+          "footer.rightAlignRoute",
+          "footer.statusLine",
+          "stickyRecords",
+          "saveConfig",
+          "addConfigComments"
+        ]
+      },
+      "view_rebuilt_at": "2026-06-18T09:04:46Z"
+    },
+    {
+      "intent_id": "int_7593437e",
+      "schema_version": 1,
+      "status": "merged",
+      "status_evidence": {
+        "sealed_event_id": "evt_0d65575b",
+        "merged_main_commit": "ef690a3662be0b7bf5ff580db468da22fce40fa1",
+        "merged_via": "pin",
+        "worktree_status": "dirty",
+        "sealed_at_branch": "master"
+      },
+      "publication": "published",
+      "actor_id": "actor_4fc3b82f",
+      "actor_name": "Jiang Ge",
+      "thread": "master",
+      "git_branch": "master",
+      "goal": "按 TDD 补齐 pi-router 测试覆盖",
+      "sealed_at": "2026-06-14T16:07:58Z",
+      "base_commit": "1f6fa54b068919888d8537355ffc5d7cf1a10ad9",
+      "code_commit": "ef690a3662be0b7bf5ff580db468da22fce40fa1",
+      "summary": {
+        "title": "Expand pi-router behavior coverage with TDD",
+        "what": "Added behavior-focused regression and integration tests for pi-router routing, config wizard flows, editor interactions, provider/model loading, config persistence, cooldown/failover, committed-stream safety, and fallback summary transfer. The TDD cycles also fixed two discovered correctness issues: explicit provider models now override provider-level headers/compat, and auth-only provider discovery no longer re-adds a provider explicitly disabled with models: []. Updated ARCHITECTURE.md testing status to reflect the covered unit/integration paths.",
+        "why": "The project is TDD-driven and the existing router/config/footer fixes needed executable behavioral coverage instead of relying on manual validation or comments. The added tests cover the previously documented Testing Strategy TODOs and guard the recent failover/config behavior from regressions.",
+        "user_goal": "按 TDD 补齐 pi-router 测试覆盖",
+        "decisions": [
+          {
+            "point": "Testing style",
+            "chose": "Use behavior/integration tests through exported helpers, real editor handleInput paths, and stream provider registration rather than mocking private internals.",
+            "rationale": "This follows the project TDD preference and keeps tests focused on observable router behavior that should survive refactors.",
+            "rejected": [
+              "Mechanical line-coverage tests for private UI/router internals",
+              "Bulk horizontal test writing without red-green feedback"
+            ]
+          },
+          {
+            "point": "Provider model merge precedence",
+            "chose": "Treat explicit provider.models entries as model-level overrides for headers/compat over provider defaults.",
+            "rationale": "The new test exposed that provider-level values were incorrectly overwriting model-specific values; model-specific configuration should be the narrower and higher-precedence source.",
+            "rejected": [
+              "Keep provider-level headers/compat overriding explicit model settings"
+            ]
+          },
+          {
+            "point": "Auth-only provider discovery versus explicit disable",
+            "chose": "Only auto-fill auth-only builtin providers when the provider is absent from models.json; preserve explicit models: [] disables.",
+            "rationale": "A user-declared provider entry in models.json is intentional configuration, and auth.json should not undo an explicit disable.",
+            "rejected": [
+              "Re-add any auth provider that produced no expanded models"
+            ]
+          },
+          {
+            "point": "Router order strategy testability",
+            "chose": "Export determineChannelOrder for behavior tests alongside existing test helpers.",
+            "rationale": "Channel order is documented strategy behavior and needed direct public-style coverage for sticky/latency/cost rules."
+          }
+        ],
+        "rejected": [
+          {
+            "alternative": "Stop after coverage reporting without fixing RED findings",
+            "reason": "The TDD cycles revealed real behavior bugs that would leave the new regression tests failing."
+          },
+          {
+            "alternative": "Commit Mainline .ml-cache/views runtime files",
+            "reason": "They are generated cache noise and not source changes."
+          }
+        ],
+        "acknowledged_constraints": [
+          {
+            "constraint_id": "footer-right-align-default",
+            "disposition": "preserved",
+            "note": "This testing pass did not change the confirmed footer runtime default; rightAlignRoute remains enabled unless explicitly false."
+          },
+          {
+            "constraint_id": "tdd-driven-project",
+            "disposition": "preserved",
+            "note": "Work proceeded in incremental red-green slices; two RED tests drove implementation fixes before final all-green validation."
+          }
+        ],
+        "review_notes": [
+          "Final validation passed: npm run typecheck, npm run build, npm test -- --run, and npm run test:coverage.",
+          "Test count increased to 64 passing tests across 3 files.",
+          "Coverage improved to total statements 54.63%, branches 44.78%, functions 60.04%, lines 55.43%; config wizard editor modules now have 100% function coverage for flat/two-tier editors.",
+          "Mainline preflight still reports overlap with previous proposed intent int_02cc3872 because this is a follow-up on the same router repair line; this was inspected as complementary rather than a semantic conflict.",
+          "Source changes were committed locally as ef690a3 test: expand router behavior coverage; remaining dirty files are only .ml-cache/views runtime cache."
+        ]
+      },
+      "fingerprint": {
+        "subsystems": [
+          "ARCHITECTURE.md",
+          "CHANGELOG.md",
+          "README.md",
+          "README.zh-CN.md",
+          "config-wizard-flow.ts",
+          "index.ts",
+          "package-lock.json",
+          "package.json",
+          "tests"
+        ],
+        "files_touched": [
+          "ARCHITECTURE.md",
+          "CHANGELOG.md",
+          "README.md",
+          "README.zh-CN.md",
+          "config-wizard-flow.ts",
+          "index.ts",
+          "package-lock.json",
+          "package.json",
+          "tests/config-wizard.test.ts",
+          "tests/performance.test.ts",
+          "tests/routing-core.test.ts"
+        ],
+        "architectural_claims": [
+          "Router behavior is now guarded by behavior-level tests for channel order, circuit breaker, latency sorting, context sanitization, failover, fallback summary transfer, cooldown skip/expiry, and stream commit safety.",
+          "Config wizard ordering and completion paths are covered through both queued result tests and keyboard-driven component interaction tests.",
+          "Provider/model expansion tests now document precedence and explicit-disable semantics."
+        ],
+        "behavioral_changes": [
+          "Explicit model headers and compat now override provider-level defaults during provider.models expansion.",
+          "Auth-only discovery no longer re-adds providers explicitly declared in models.json, preserving models: [] as an intentional disable.",
+          "No intended change to footer default behavior or routing runtime defaults beyond the two regression fixes."
+        ],
+        "api_changes": [
+          {
+            "kind": "added",
+            "surface": "function",
+            "signature": "determineChannelOrder(modelId, modelConfig, config)",
+            "compatibility": "compatible"
+          }
+        ],
+        "data_model_changes": [
+          {
+            "kind": "modified",
+            "name": "models.json providers.\u003cname\u003e.models: [] semantics",
+            "location": "models.json provider loading in index.ts",
+            "compatibility": "compatible",
+            "migration_required": false,
+            "migration_notes": "Existing explicit empty model arrays now remain disabled even when the same provider appears in auth.json."
+          }
+        ],
+        "security_implications": [
+          "No new auth surfaces. Header merge precedence now better respects model-specific overrides, which can avoid accidental propagation of provider-default headers to models that override them."
+        ],
+        "migration_notes": [
+          "No migration required. Users who intentionally set models: [] get the documented disabling behavior even with auth.json entries present."
+        ],
+        "tags": [
+          "tdd",
+          "tests",
+          "router-failover",
+          "config-wizard",
+          "provider-loading",
+          "regression"
+        ]
+      },
+      "view_rebuilt_at": "2026-06-18T09:04:46Z"
+    }
+  ],
+  "notes_health": {
+    "notes_total": 4,
+    "reachable_notes": 4,
+    "unreachable_mainline_notes": 0,
+    "likely_history_rewrite": false,
+    "checked_at": "2026-06-18T09:04:46Z"
+  }
 }

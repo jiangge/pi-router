@@ -306,10 +306,10 @@ Show last 20 routing decisions with:
 - Reason
 
 ### `/router sync`
-Check for model changes in `models.json` and show diff
+Check for explicitly declared model changes in `models.json` and show diff
 
 ### `/router sync accept`
-Apply detected changes to config
+Apply explicitly declared `models.json` changes to config
 
 ### `/router diff`
 Preview differences between config and `models.json`

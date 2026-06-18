@@ -40,7 +40,7 @@ Pi 的智能路由层，提供多级故障转移与可观测性。
 pi install npm:pi-router
 
 # 或从 GitHub 安装
-pi install git:github.com/jiangjilin/pi-router
+pi install git:github.com/jiangge/pi-router
 
 # 或从本地目录安装（开发用）
 pi install /path/to/pi-router
@@ -160,10 +160,13 @@ pi-router 会：
 ### 管理
 
 ```text
-/router sync             # 检查 models.json 变更
-/router sync accept      # 应用检测到的变更
+/router sync             # 检查 models.json 显式声明的模型变更
+/router sync accept      # 应用 models.json 显式声明的模型变更
 /router diff             # 预览配置差异
 ```
+
+`/router sync` 只同步 `models.json` 中显式声明的 provider 与模型，
+不会把 `auth.json` 触发发现的 builtin 模型写入 router 配置。
 
 ## 工作原理
 
@@ -351,7 +354,11 @@ Footer 默认行为：
 ```json
 {
   "id": "example-model",
+  "aliases": ["Example-Model", "proxy/example-model"],
   "channels": ["Provider-A", "Provider-B"],
+  "modelByChannel": {
+    "Provider-B": "proxy/example-model"
+  },
   "sticky": true,
   "sortBy": "latency",
   "contextTransfer": "summary",
@@ -366,6 +373,15 @@ Footer 默认行为：
   }
 }
 ```
+
+别名字段允许一个面向 Pi 的 canonical router 模型归并不同 provider 的真实上游模型 ID，而无需修改 `models.json`：
+
+- `id` 是在 Pi 中选择的 canonical `router/<id>` 模型
+- `aliases` 列出可视为同一真实模型的上游模型 ID，用于 sync/grouping
+- `modelByChannel[channel]` 指定该 provider 需要发送的精确上游模型 ID
+- 如果没有 `modelByChannel`，pi-router 会依次尝试 `id` 和 aliases 在该 channel 下的真实模型
+
+pi-router 也会通过可选的 `Symbol.for("pi.routing.registry.v1")` 协议暴露当前真实路由，并从 `Symbol.for("pi.cache.hints.v1")` 读取可选缓存提示。这样可以用协议方式集成缓存/状态类扩展，同时保留上游 assistant message 的真实 metadata 供缓存统计使用。
 
 ### 手动编辑
 
@@ -408,7 +424,7 @@ pi-router 针对快速启动和最小开销进行了优化。
 pi remove npm:pi-router
 
 # git 安装
-pi remove git:github.com/jiangjilin/pi-router
+pi remove git:github.com/jiangge/pi-router
 
 # 本地安装
 pi remove /path/to/pi-router

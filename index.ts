@@ -1,5 +1,5 @@
 /**
- * pi-router v0.3.2
+ * pi-router v0.4.0
  * Intelligent routing layer for pi coding agent
  *
  * Routes channels (same model, different providers) with optional fallback models.
@@ -21,6 +21,8 @@ const ROUTER_API = "pi-router" as Api;
 const ROUTER_DUMMY_API_KEY = "router";
 const DEFAULT_ROUTER_TIMEOUT_MS = Number(process.env.PI_ROUTER_TIMEOUT_MS || 120000);
 const DEFAULT_ROUTER_MAX_TOKENS = Number(process.env.PI_ROUTER_MAX_TOKENS || 32768);
+const PI_ROUTING_REGISTRY = Symbol.for("pi.routing.registry.v1");
+const PI_CACHE_HINTS = Symbol.for("pi.cache.hints.v1");
 
 function debugLog(...args: unknown[]): void {
   if (PI_ROUTER_DEBUG) {
@@ -44,6 +46,54 @@ type PiModel = {
   input?: string[];
 };
 
+type PiRouteSnapshot = {
+  virtualProvider: string;
+  virtualModelId: string;
+  provider: string;
+  modelId: string;
+  api?: string;
+  canonicalModelId?: string;
+  routeLabel?: string;
+  status?: "planned" | "trying" | "selected" | "success" | "failed";
+  sessionIdHash?: string;
+  requestId?: string;
+  timestamp: number;
+};
+
+type PiRouterAdapterV1 = {
+  virtualProvider: string;
+  resolveActiveRoute: (
+    virtualModelId: string,
+    hint?: { sessionIdHash?: string; requestId?: string }
+  ) => PiRouteSnapshot | undefined;
+  resolveCandidateRoutes?: (virtualModelId: string) => PiRouteSnapshot[];
+  subscribe?: (listener: (event: PiRouteSnapshot) => void) => () => void;
+};
+
+type PiRoutingRegistryV1 = {
+  version: 1;
+  registerRouter: (adapter: PiRouterAdapterV1) => () => void;
+  getRouter: (virtualProvider: string) => PiRouterAdapterV1 | undefined;
+};
+
+type PiCacheHintsV1 = {
+  version: 1;
+  getHints: (input: {
+    sessionIdHash?: string;
+    // Transitional alias used by early integrations; new code should prefer sessionIdHash.
+    sessionId?: string;
+    virtualProvider?: string;
+    virtualModelId?: string;
+    upstreamProvider?: string;
+    upstreamModelId?: string;
+    api?: string;
+  }) => {
+    systemPrompt?: string;
+    promptCacheKey?: string;
+    cacheRetention?: "long";
+  } | undefined;
+};
+
 type RouterConfig = {
   strategy?: "channelFirst" | "custom";
   auto?: boolean;
@@ -55,6 +105,11 @@ type RouterConfig = {
     maxTokens?: number;
   };
   models?: RouterModelConfig[];
+  /**
+   * Legacy/global alias map kept for migration compatibility. Prefer per-model
+   * `models[].aliases` so each canonical router model owns its upstream IDs.
+   */
+  modelAliases?: Record<string, string[]>;
   customOrder?: string[];  // For custom strategy: array of "modelId@channel" strings
   failover?: {
     on?: string[];
@@ -111,7 +166,15 @@ type RouterModelConfig = {
   fallbackModels?: Array<{
     id: string;
     channels: string[];
+    /** Upstream model IDs considered equivalent to this fallback id. */
+    aliases?: string[];
+    /** Per-channel upstream model id when it differs from the canonical id. */
+    modelByChannel?: Record<string, string>;
   }>;
+  /** Upstream model IDs considered equivalent to this canonical router id. */
+  aliases?: string[];
+  /** Per-channel upstream model id when it differs from the canonical id. */
+  modelByChannel?: Record<string, string>;
   fallbackMode?: "switch" | "inline";
   sticky?: boolean;
   contextTransfer?: "none" | "summary" | "full";  // Override global setting per model
@@ -283,7 +346,7 @@ function estimateRequestCost(
  * Diff types for models.json changes
  */
 type ModelDiff = {
-  added: Array<{ id: string; channels: string[] }>;
+  added: Array<{ id: string; channels: string[]; aliases?: string[]; modelByChannel?: Record<string, string> }>;
   removed: Array<{ id: string; channels: string[] }>;
   modified: Array<{
     id: string;
@@ -316,7 +379,7 @@ let providerIdsCache: { authProviders: string[]; modelsProviders: string[]; mtim
  * Load provider IDs from both auth.json and models.json with caching
  * FIX #9, #13: Consolidate synchronous file reads and cache results
  */
-function loadProviderIds(): { authProviders: string[]; modelsProviders: string[] } {
+function loadProviderIds(forceRefresh = false): { authProviders: string[]; modelsProviders: string[] } {
   const authPath = path.join(getPiConfigDir(), "auth.json");
   const modelsPath = getModelsJsonPath();
 
@@ -324,7 +387,8 @@ function loadProviderIds(): { authProviders: string[]; modelsProviders: string[]
   const modelsMtime = getFileMtimeMs(modelsPath);
 
   // Return cached if mtimes haven't changed
-  if (providerIdsCache &&
+  if (!forceRefresh &&
+      providerIdsCache &&
       providerIdsCache.mtimeMs.auth === authMtime &&
       providerIdsCache.mtimeMs.models === modelsMtime) {
     return {
@@ -584,9 +648,13 @@ function filterConfigurableModels(models: PiModel[], allowedProviders: Set<strin
   );
 }
 
-function getConfigurableModels(modelRegistry?: any): PiModel[] {
-  const { authProviders, modelsProviders } = loadProviderIds();
+function getConfigurableModels(modelRegistry?: any, forceRefresh = false): PiModel[] {
+  const { authProviders, modelsProviders } = loadProviderIds(forceRefresh);
   const allowedProviders = new Set<string>([...authProviders, ...modelsProviders]);
+  const diskModels = loadModelsJson(forceRefresh);
+  if (diskModels.length > 0) {
+    return filterConfigurableModels(diskModels, allowedProviders);
+  }
   return filterConfigurableModels(getEffectiveModels(modelRegistry), allowedProviders);
 }
 
@@ -628,7 +696,7 @@ function checkAutoSyncOnce(): void {
   if (autoSyncConfig.autoSync !== false && autoSyncConfig.lastSyncHash) {
     debugLog("[pi-router] Checking for models.json changes...");
 
-    const models = loadModelsJson();
+    const models = getSyncModels();
     const modelsJsonHash = calculateFileHash(getModelsJsonPath());
 
     if (autoSyncConfig.lastSyncHash !== modelsJsonHash) {
@@ -644,7 +712,7 @@ function checkAutoSyncOnce(): void {
   }
 }
 
-function calculateFileHash(filePath: string): string {
+function calculateFileHash(filePath: string, forceRefresh = false): string {
   if (!fs.existsSync(filePath)) return "";
   
   try {
@@ -653,7 +721,7 @@ function calculateFileHash(filePath: string): string {
     
     // Check cache - if file hasn't changed, return cached hash
     const cached = fileHashCache.get(filePath);
-    if (cached && cached.mtime === mtime) {
+    if (!forceRefresh && cached && cached.mtime === mtime) {
       return cached.hash;
     }
     
@@ -680,7 +748,7 @@ const CACHE_TTL = 60000; // 1 minute cache
 /**
  * Load models from models.json (with caching)
  */
-function loadModelsJson(): PiModel[] {
+function loadModelsJson(forceRefresh = false): PiModel[] {
   const now = Date.now();
   const modelsPath = getModelsJsonPath();
   const authPath = path.join(getPiConfigDir(), "auth.json");
@@ -688,6 +756,7 @@ function loadModelsJson(): PiModel[] {
   const authMtime = getFileMtimeMs(authPath);
 
   if (
+    !forceRefresh &&
     modelsCache &&
     modelsCacheModelsMtime === modelsMtime &&
     modelsCacheAuthMtime === authMtime &&
@@ -743,6 +812,33 @@ function loadModelsJson(): PiModel[] {
   }
 }
 
+function loadExplicitModelsJson(): PiModel[] {
+  const modelsPath = getModelsJsonPath();
+
+  if (!fs.existsSync(modelsPath)) {
+    return [];
+  }
+
+  try {
+    const content = fs.readFileSync(modelsPath, "utf-8");
+    const data = JSON.parse(content);
+
+    if (!data.providers || typeof data.providers !== "object") {
+      return [];
+    }
+
+    const explicitModels: PiModel[] = [];
+    for (const [providerName, providerData] of Object.entries(data.providers)) {
+      explicitModels.push(...expandProviderModels(providerName, providerData as any));
+    }
+
+    return explicitModels;
+  } catch (err) {
+    console.error("[pi-router] Failed to load explicit models.json entries:", err);
+    return [];
+  }
+}
+
 /**
  * Group models by id (collect all channels for same model)
  */
@@ -759,11 +855,169 @@ function groupModelsByChannels(models: PiModel[]): Map<string, string[]> {
   return groups;
 }
 
+type ResolvedModelRoute = {
+  canonicalId: string;
+  upstreamId: string;
+  channel: string;
+  model: PiModel;
+};
+
+type ModelAliasGroup = {
+  channels: string[];
+  aliases: string[];
+  modelByChannel: Record<string, string>;
+};
+
+function normalizeModelAliasId(id: string): string {
+  return id.trim().toLowerCase();
+}
+
+function addModelAlias(aliases: string[], alias: unknown, canonicalId: string): void {
+  if (typeof alias !== "string") return;
+  const trimmed = alias.trim();
+  if (!trimmed || trimmed === canonicalId) return;
+  if (!aliases.includes(trimmed)) aliases.push(trimmed);
+}
+
+function getModelConfigAliases(modelConfig: Pick<RouterModelConfig, "id" | "aliases" | "modelByChannel">): string[] {
+  const aliases: string[] = [];
+  for (const alias of modelConfig.aliases || []) {
+    addModelAlias(aliases, alias, modelConfig.id);
+  }
+  for (const alias of Object.values(modelConfig.modelByChannel || {})) {
+    addModelAlias(aliases, alias, modelConfig.id);
+  }
+  return aliases;
+}
+
+function buildModelAliasLookup(config?: RouterConfig): Map<string, string> {
+  const lookup = new Map<string, string>();
+
+  for (const modelConfig of config?.models || []) {
+    lookup.set(normalizeModelAliasId(modelConfig.id), modelConfig.id);
+    for (const alias of getModelConfigAliases(modelConfig)) {
+      lookup.set(normalizeModelAliasId(alias), modelConfig.id);
+    }
+    for (const fallback of modelConfig.fallbackModels || []) {
+      lookup.set(normalizeModelAliasId(fallback.id), fallback.id);
+      for (const alias of getModelConfigAliases(fallback)) {
+        lookup.set(normalizeModelAliasId(alias), fallback.id);
+      }
+    }
+  }
+
+  // Legacy compatibility for configs that adopted the earlier draft shape.
+  for (const [canonicalId, aliases] of Object.entries(config?.modelAliases || {})) {
+    lookup.set(normalizeModelAliasId(canonicalId), canonicalId);
+    for (const alias of aliases || []) {
+      if (typeof alias === "string" && alias.trim().length > 0) {
+        lookup.set(normalizeModelAliasId(alias), canonicalId);
+      }
+    }
+  }
+
+  return lookup;
+}
+
+function resolveCanonicalModelId(modelId: string, config?: RouterConfig): string {
+  return buildModelAliasLookup(config).get(normalizeModelAliasId(modelId)) || modelId;
+}
+
+function getCandidateUpstreamModelIds(modelConfig: Pick<RouterModelConfig, "id" | "aliases" | "modelByChannel">, channel: string): string[] {
+  const candidates: string[] = [];
+  const addCandidate = (id: unknown) => {
+    if (typeof id !== "string") return;
+    const trimmed = id.trim();
+    if (!trimmed || candidates.includes(trimmed)) return;
+    candidates.push(trimmed);
+  };
+
+  addCandidate(modelConfig.modelByChannel?.[channel]);
+  addCandidate(modelConfig.id);
+  for (const alias of modelConfig.aliases || []) addCandidate(alias);
+  for (const alias of Object.values(modelConfig.modelByChannel || {})) addCandidate(alias);
+
+  return candidates;
+}
+
+function getUpstreamModelId(modelConfig: Pick<RouterModelConfig, "id" | "aliases" | "modelByChannel">, channel: string): string {
+  return getCandidateUpstreamModelIds(modelConfig, channel)[0] || modelConfig.id;
+}
+
+function resolveConfiguredRoute(
+  modelConfig: RouterModelConfig,
+  channel: string,
+  modelMap: Map<string, PiModel>
+): ResolvedModelRoute | undefined {
+  for (const upstreamId of getCandidateUpstreamModelIds(modelConfig, channel)) {
+    const targetModel = modelMap.get(`${upstreamId}@${channel}`);
+    if (targetModel) {
+      return {
+        canonicalId: modelConfig.id,
+        upstreamId,
+        channel,
+        model: targetModel,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function getConfiguredModel(
+  modelConfig: RouterModelConfig,
+  channel: string,
+  modelMap: Map<string, PiModel>
+): PiModel | undefined {
+  return resolveConfiguredRoute(modelConfig, channel, modelMap)?.model;
+}
+
+function createEmptyAliasGroup(): ModelAliasGroup {
+  return { channels: [], aliases: [], modelByChannel: {} };
+}
+
+function groupModelsByChannelsWithAliases(
+  models: PiModel[],
+  config?: RouterConfig
+): Map<string, ModelAliasGroup> {
+  const groups = new Map<string, ModelAliasGroup>();
+
+  for (const model of models) {
+    const canonicalId = resolveCanonicalModelId(model.id, config);
+    if (!groups.has(canonicalId)) {
+      groups.set(canonicalId, createEmptyAliasGroup());
+    }
+
+    const group = groups.get(canonicalId)!;
+    if (!group.channels.includes(model.provider)) {
+      group.channels.push(model.provider);
+    }
+    if (model.id !== canonicalId) {
+      group.modelByChannel[model.provider] = model.id;
+      addModelAlias(group.aliases, model.id, canonicalId);
+    }
+  }
+
+  return groups;
+}
+
+function createRouterModelConfigFromGroup(
+  id: string,
+  group: ModelAliasGroup
+): RouterModelConfig {
+  return {
+    id,
+    ...(group.aliases.length > 0 ? { aliases: group.aliases } : {}),
+    channels: group.channels,
+    ...(Object.keys(group.modelByChannel).length > 0 ? { modelByChannel: group.modelByChannel } : {}),
+  };
+}
+
 /**
  * Detect changes between current models.json and config
  */
 function detectModelChanges(config: RouterConfig, currentModels: PiModel[]): ModelDiff {
-  const currentGroups = groupModelsByChannels(currentModels);
+  const currentGroups = groupModelsByChannelsWithAliases(currentModels, config);
   const configModels = config.models || [];
   
   const diff: ModelDiff = {
@@ -773,35 +1027,73 @@ function detectModelChanges(config: RouterConfig, currentModels: PiModel[]): Mod
   };
   
   // Check for added models
-  for (const [modelId, channels] of currentGroups.entries()) {
+  for (const [modelId, group] of currentGroups.entries()) {
     const configModel = configModels.find(m => m.id === modelId);
     if (!configModel) {
-      diff.added.push({ id: modelId, channels });
+      diff.added.push({
+        id: modelId,
+        channels: group.channels,
+        ...(group.aliases.length > 0 ? { aliases: group.aliases } : {}),
+        ...(Object.keys(group.modelByChannel).length > 0 ? { modelByChannel: group.modelByChannel } : {}),
+      });
     }
   }
   
   // Check for removed/modified models
   for (const configModel of configModels) {
-    const currentChannels = currentGroups.get(configModel.id);
+    const currentGroup = currentGroups.get(configModel.id);
     
-    if (!currentChannels) {
+    if (!currentGroup) {
       diff.removed.push({ id: configModel.id, channels: configModel.channels });
     } else {
-      const channelsAdded = currentChannels.filter(c => !configModel.channels.includes(c));
-      const channelsRemoved = configModel.channels.filter(c => !currentChannels.includes(c));
+      const channelsAdded = currentGroup.channels.filter(c => !configModel.channels.includes(c));
+      const channelsRemoved = configModel.channels.filter(c => !currentGroup.channels.includes(c));
+      const missingAliases = currentGroup.aliases.filter(alias => !(configModel.aliases || []).includes(alias));
+      const modelByChannelChanged = !recordsEqual(configModel.modelByChannel, currentGroup.modelByChannel);
+      const propsChanged = [
+        ...(missingAliases.length > 0 ? ["aliases"] : []),
+        ...(modelByChannelChanged ? ["modelByChannel"] : []),
+      ];
       
-      if (channelsAdded.length > 0 || channelsRemoved.length > 0) {
+      if (channelsAdded.length > 0 || channelsRemoved.length > 0 || propsChanged.length > 0) {
         diff.modified.push({
           id: configModel.id,
           channelsAdded,
           channelsRemoved,
-          propsChanged: [],
+          propsChanged,
         });
       }
     }
   }
   
   return diff;
+}
+
+function getSyncModels(): PiModel[] {
+  const explicitModels = loadExplicitModelsJson();
+  const { modelsProviders } = loadProviderIds(true);
+  return filterConfigurableModels(explicitModels, new Set(modelsProviders));
+}
+
+function normalizeRecord(record: Record<string, string> | undefined): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const key of Object.keys(record || {}).sort()) {
+    const value = record?.[key];
+    if (typeof value === "string") normalized[key] = value;
+  }
+  return normalized;
+}
+
+function normalizeStringList(values: string[] | undefined): string[] {
+  return Array.from(new Set((values || []).filter(value => typeof value === "string" && value.length > 0))).sort();
+}
+
+function aliasesEqual(a: string[] | undefined, b: string[] | undefined): boolean {
+  return JSON.stringify(normalizeStringList(a)) === JSON.stringify(normalizeStringList(b));
+}
+
+function recordsEqual(a: Record<string, string> | undefined, b: Record<string, string> | undefined): boolean {
+  return JSON.stringify(normalizeRecord(a)) === JSON.stringify(normalizeRecord(b));
 }
 
 let configFileMtimeMs: number | null = null;
@@ -924,7 +1216,7 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
     ...(config.stickyRecords && Object.keys(config.stickyRecords).length > 0
       ? { _comment_stickyRecords: "运行时粘性路由记录，由 pi-router 自动维护", stickyRecords: config.stickyRecords }
       : {}),
-    _comment_models: "模型配置: channels 从左到右依次尝试；fallbackModels 为模型级降级链",
+    _comment_models: "模型配置: id 是 router/<id> 的 canonical 名；aliases/modelByChannel 可把不同上游模型名归并到同一模型；channels 从左到右依次尝试；fallbackModels 为模型级降级链",
     models: config.models ?? [],
     _comment_customOrder: "自定义顺序(仅 custom 策略): model@channel 二元组数组，按此顺序尝试",
     ...(config.customOrder ? { customOrder: config.customOrder } : {}),
@@ -1174,7 +1466,7 @@ async function showRouterMenu(ctx: any, config: RouterConfig): Promise<void> {
 
   const result = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: any) => {
     const container = new Container();
-    container.addChild(new Text(theme.fg("accent", theme.bold("\u2554 Pi-Router (v0.3.2)")), 1, 1));
+    container.addChild(new Text(theme.fg("accent", theme.bold("\u2554 Pi-Router (v0.4.0)")), 1, 1));
     container.addChild(new Text(theme.fg("dim", "\u2500".repeat(40)), 1, 0));
 
     const selectList = new SelectList(items, items.length, {
@@ -1246,7 +1538,7 @@ async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
     case "wizard":
       await runConfigWizard(
         ctx,
-        () => getConfigurableModels(ctx.modelRegistry),
+        () => getConfigurableModels(ctx.modelRegistry, true),
         groupModelsByChannels,
         saveConfig,
         calculateFileHash,
@@ -1257,7 +1549,7 @@ async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
       await runConfigOrderWizard(
         ctx,
         config,
-        () => getConfigurableModels(ctx.modelRegistry),
+        () => getConfigurableModels(ctx.modelRegistry, true),
         saveConfig,
       );
       break;
@@ -1282,18 +1574,228 @@ async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
  * turn_start misses mid-turn route changes and can leave the footer blank until
  * the next user turn.
  */
+function getCurrentSessionHash(): string | undefined {
+  return routerState.currentSessionHash;
+}
+
+function hashRouteSessionId(sessionId: unknown): string | undefined {
+  if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+  return crypto.createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+}
+
+function getSessionHashFromManager(sessionManager: any): string | undefined {
+  try {
+    return hashRouteSessionId(sessionManager?.getSessionId?.());
+  } catch {
+    return undefined;
+  }
+}
+
+function getRouteSnapshotKey(virtualModelId: string, sessionIdHash?: string): string {
+  return `${sessionIdHash || "global"}:${virtualModelId}`;
+}
+
+function publishRouteSnapshot(snapshot: PiRouteSnapshot): void {
+  routerState.activeRouteSnapshots.set(getRouteSnapshotKey(snapshot.virtualModelId, snapshot.sessionIdHash), snapshot);
+  routerState.activeRouteSnapshots.set(getRouteSnapshotKey(snapshot.virtualModelId), snapshot);
+  for (const listener of routerState.routeListeners) {
+    try {
+      listener(snapshot);
+    } catch (err) {
+      debugLog("[pi-router] Route listener failed:", err);
+    }
+  }
+}
+
+function findConfiguredModelById(config: RouterConfig, modelId: string): RouterModelConfig | undefined {
+  return config.models?.find(model => model.id === modelId);
+}
+
+function buildRouteSnapshot(
+  virtualModelId: string,
+  canonicalModelId: string,
+  upstreamModel: PiModel,
+  status: PiRouteSnapshot["status"],
+  sessionIdHash?: string,
+  timestamp = Date.now()
+): PiRouteSnapshot {
+  return {
+    virtualProvider: "router",
+    virtualModelId,
+    canonicalModelId,
+    provider: upstreamModel.provider,
+    modelId: upstreamModel.id,
+    api: upstreamModel.api,
+    routeLabel: upstreamModel.id === canonicalModelId
+      ? `${upstreamModel.provider}/${upstreamModel.id}`
+      : `${canonicalModelId} -> ${upstreamModel.provider}/${upstreamModel.id}`,
+    status,
+    sessionIdHash,
+    timestamp,
+  };
+}
+
+function updateRouteSnapshot(
+  virtualModelId: string,
+  canonicalModelId: string,
+  upstreamModel: PiModel,
+  status: PiRouteSnapshot["status"]
+): void {
+  publishRouteSnapshot(buildRouteSnapshot(
+    virtualModelId,
+    canonicalModelId,
+    upstreamModel,
+    status,
+    getCurrentSessionHash(),
+  ));
+}
+
+function ensureRoutingRegistry(): PiRoutingRegistryV1 {
+  const globalRecord = globalThis as Record<PropertyKey, unknown>;
+  const existing = globalRecord[PI_ROUTING_REGISTRY] as PiRoutingRegistryV1 | undefined;
+  if (existing?.version === 1 && typeof existing.registerRouter === "function" && typeof existing.getRouter === "function") {
+    return existing;
+  }
+
+  const adapters = new Map<string, PiRouterAdapterV1>();
+  const registry: PiRoutingRegistryV1 = {
+    version: 1,
+    registerRouter(adapter: PiRouterAdapterV1) {
+      adapters.set(adapter.virtualProvider, adapter);
+      return () => {
+        if (adapters.get(adapter.virtualProvider) === adapter) {
+          adapters.delete(adapter.virtualProvider);
+        }
+      };
+    },
+    getRouter(virtualProvider: string) {
+      return adapters.get(virtualProvider);
+    },
+  };
+  globalRecord[PI_ROUTING_REGISTRY] = registry;
+  return registry;
+}
+
+function resolveActiveRouteSnapshot(virtualModelId: string, hint?: { sessionIdHash?: string; requestId?: string }): PiRouteSnapshot | undefined {
+  const sessionIdHash = hint?.sessionIdHash || getCurrentSessionHash();
+  return routerState.activeRouteSnapshots.get(getRouteSnapshotKey(virtualModelId, sessionIdHash))
+    || routerState.activeRouteSnapshots.get(getRouteSnapshotKey(virtualModelId));
+}
+
+function resolveCandidateRouteSnapshots(virtualModelId: string): PiRouteSnapshot[] {
+  const config = currentRouterConfig;
+  if (!config) return [];
+
+  const modelMap = getCachedModelMap(routerState.currentModelRegistry);
+  const snapshots: PiRouteSnapshot[] = [];
+  const appendSnapshot = (routerModelId: string, modelConfig: RouterModelConfig, channel: string) => {
+    const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
+    if (!route) return;
+    snapshots.push(buildRouteSnapshot(routerModelId, modelConfig.id, route.model, "planned", undefined, 0));
+  };
+
+  if (virtualModelId === "auto") {
+    for (const modelConfig of config.models || []) {
+      for (const channel of modelConfig.channels) {
+        appendSnapshot("auto", modelConfig, channel);
+      }
+    }
+    return snapshots;
+  }
+
+  const modelConfig = findConfiguredModelById(config, virtualModelId);
+  if (!modelConfig) return [];
+  for (const channel of modelConfig.channels) {
+    appendSnapshot(virtualModelId, modelConfig, channel);
+  }
+  return snapshots;
+}
+
+function registerRoutingAdapter(): void {
+  if (routerState.unregisterRoutingAdapter) return;
+
+  const registry = ensureRoutingRegistry();
+  routerState.unregisterRoutingAdapter = registry.registerRouter({
+    virtualProvider: "router",
+    resolveActiveRoute: resolveActiveRouteSnapshot,
+    resolveCandidateRoutes: resolveCandidateRouteSnapshots,
+    subscribe(listener) {
+      routerState.routeListeners.add(listener);
+      return () => routerState.routeListeners.delete(listener);
+    },
+  });
+}
+
+function readCacheHints(input: Parameters<PiCacheHintsV1["getHints"]>[0]): ReturnType<PiCacheHintsV1["getHints"]> {
+  const service = (globalThis as Record<PropertyKey, unknown>)[PI_CACHE_HINTS] as PiCacheHintsV1 | undefined;
+  if (service?.version !== 1 || typeof service.getHints !== "function") return undefined;
+  try {
+    return service.getHints(input);
+  } catch (err) {
+    debugLog("[pi-router] Cache hints lookup failed:", err);
+    return undefined;
+  }
+}
+
+function applyCacheHintsToRequest(
+  context: Context,
+  options: SimpleStreamOptions | undefined,
+  model: PiModel,
+  virtualModelId?: string
+): { context: Context; options: SimpleStreamOptions | undefined } {
+  const sessionIdHash = getCurrentSessionHash();
+  const resolvedVirtualModelId = virtualModelId || (routerState.currentModelProvider === "router" ? routerState.currentModel?.id : undefined);
+  const baseHintInput = {
+    sessionIdHash,
+    sessionId: sessionIdHash,
+    virtualProvider: "router",
+    virtualModelId: resolvedVirtualModelId,
+  };
+  // Prefer route-exact hints when the cache optimizer already knows the upstream
+  // provider/model. On the first router turn, the optimizer may only know the
+  // virtual router model during before_agent_start; retry with virtual-only input
+  // so the optimized prompt/cache key still reaches the inner upstream request.
+  const hints = readCacheHints({
+    ...baseHintInput,
+    upstreamProvider: model.provider,
+    upstreamModelId: model.id,
+    api: model.api,
+  }) || readCacheHints(baseHintInput);
+
+  if (!hints) return { context, options };
+
+  const nextContext = hints.systemPrompt && hints.systemPrompt !== context.systemPrompt
+    ? { ...context, systemPrompt: hints.systemPrompt }
+    : context;
+  const nextOptions: SimpleStreamOptions | undefined = options ? { ...options } : {};
+
+  if (hints.promptCacheKey && !nextOptions.sessionId) {
+    nextOptions.sessionId = hints.promptCacheKey;
+  }
+  if (hints.cacheRetention && !nextOptions.cacheRetention) {
+    nextOptions.cacheRetention = hints.cacheRetention;
+  }
+
+  return {
+    context: nextContext,
+    options: Object.keys(nextOptions).length > 0 ? nextOptions : undefined,
+  };
+}
+
 function updateFooterStatus(
   modelId: string,
   channel: string,
   actualModelId?: string,
   phase: RouterStatusPhase = "trying",
   attemptedChannels?: string[],
-  error?: string
+  error?: string,
+  api?: string
 ): void {
   routerState.lastStatusUpdate = {
     modelId,
     channel,
     actualModelId,
+    api,
     phase,
     attemptedChannels,
     error,
@@ -1535,6 +2037,7 @@ function refreshFooterContext(ctx: any, thinkingLevel?: string): void {
   routerState.currentModelProvider = ctx.model?.provider;
   routerState.currentThinkingLevel = thinkingLevel;
   routerState.currentSessionManager = ctx.sessionManager;
+  routerState.currentSessionHash = getSessionHashFromManager(ctx.sessionManager);
   routerState.currentGetContextUsage = typeof ctx.getContextUsage === "function" ? () => ctx.getContextUsage() : undefined;
   routerState.currentModelRegistry = ctx.modelRegistry;
 }
@@ -1612,6 +2115,7 @@ let routerHandlerRef: ((args: string, ctx: any) => Promise<void>) | null = null;
 export default function (pi: ExtensionAPI) {
   const config = setCurrentRouterConfig(loadConfig());
   configFileMtimeMs = getFileMtimeMs(getRouterConfigPath());
+  registerRoutingAdapter();
 
   // Check if we have configured models
   const hasConfiguredModels = config.models && config.models.length > 0;
@@ -1631,15 +2135,12 @@ export default function (pi: ExtensionAPI) {
 
     // Auto-discover models if enabled and no models configured
     if (config.auto && !hasConfiguredModels) {
-      const groups = groupModelsByChannels(currentModels);
+      const groups = groupModelsByChannelsWithAliases(currentModels, config);
       const autoModels: RouterModelConfig[] = [];
 
-      for (const [modelId, channels] of groups.entries()) {
-        if (channels.length > 1) {
-          autoModels.push({
-            id: modelId,
-            channels,
-          });
+      for (const [modelId, group] of groups.entries()) {
+        if (group.channels.length > 1) {
+          autoModels.push(createRouterModelConfigFromGroup(modelId, group));
         }
       }
 
@@ -1678,7 +2179,7 @@ export default function (pi: ExtensionAPI) {
     }, 1000);
   }
   
-  debugLog("[pi-router] Extension loaded (v0.3.2)");
+  debugLog("[pi-router] Extension loaded (v0.4.0)");
   debugLog("[pi-router] Strategy:", config.strategy ?? "channelFirst");
   debugLog("[pi-router] Configured models:", config.models?.length ?? 0);
   
@@ -1828,7 +2329,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
       // Run configuration wizard
       await runConfigWizard(
         ctx,
-        () => getConfigurableModels(ctx.modelRegistry),
+        () => getConfigurableModels(ctx.modelRegistry, true),
         groupModelsByChannels,
         saveConfig,
         calculateFileHash,
@@ -1838,7 +2339,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
       await runConfigOrderWizard(
         ctx,
         config,
-        () => getConfigurableModels(ctx.modelRegistry),
+        () => getConfigurableModels(ctx.modelRegistry, true),
         saveConfig,
       );
     } else if (matchedSubcmd === "show") {
@@ -2064,7 +2565,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     
     if (action === "accept") {
       // Apply changes
-      const currentModels = getConfigurableModels(ctx.modelRegistry);
+      const currentModels = getSyncModels();
       const diff = detectModelChanges(config, currentModels);
       
       // Remove deleted models
@@ -2076,27 +2577,44 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
         config.models = [];
       }
       
+      const currentGroups = groupModelsByChannelsWithAliases(currentModels, config);
+
       // Add new models
       for (const added of diff.added) {
-        config.models.push({
-          id: added.id,
-          channels: added.channels,
-        });
+        const group = currentGroups.get(added.id);
+        config.models.push(group
+          ? createRouterModelConfigFromGroup(added.id, group)
+          : { id: added.id, channels: added.channels }
+        );
       }
       
       // Update modified models
       for (const modified of diff.modified) {
         const model = config.models.find(m => m.id === modified.id);
-        if (model) {
+        const group = currentGroups.get(modified.id);
+        if (model && group) {
           // Merge channels
           const allChannels = new Set([...model.channels, ...modified.channelsAdded]);
           modified.channelsRemoved.forEach(c => allChannels.delete(c));
           model.channels = Array.from(allChannels);
+          model.aliases = [...new Set([...(model.aliases || []), ...group.aliases])];
+          model.modelByChannel = {};
+          for (const channel of model.channels) {
+            const upstreamId = group.modelByChannel[channel];
+            if (!upstreamId || upstreamId === model.id) continue;
+            model.modelByChannel[channel] = upstreamId;
+          }
+          if (Object.keys(model.modelByChannel).length === 0) {
+            delete model.modelByChannel;
+          }
+          if (model.aliases.length === 0) {
+            delete model.aliases;
+          }
         }
       }
       
       // Update sync hash
-      const modelsJsonHash = calculateFileHash(getModelsJsonPath());
+      const modelsJsonHash = calculateFileHash(getModelsJsonPath(), true);
       config.lastSyncHash = modelsJsonHash;
       
       saveConfig(config);
@@ -2111,7 +2629,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
       );
     } else {
       // Show diff
-      const currentModels = getConfigurableModels(ctx.modelRegistry);
+      const currentModels = getSyncModels();
       const diff = detectModelChanges(config, currentModels);
       const hasChanges = diff.added.length > 0 || diff.removed.length > 0 || diff.modified.length > 0;
       
@@ -2142,6 +2660,9 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
             if (m.channelsRemoved.length > 0) {
               lines.push(`    - ${m.channelsRemoved.join(", ")}`);
             }
+            if (m.propsChanged.length > 0) {
+              lines.push(`    props: ${m.propsChanged.join(", ")}`);
+            }
           });
         }
         
@@ -2152,8 +2673,8 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
       }
     }
   } else if (subcommand === "diff") {
-    const currentModels = getConfigurableModels(ctx.modelRegistry);
-    const currentGroups = groupModelsByChannels(currentModels);
+    const currentModels = getSyncModels();
+    const currentGroups = groupModelsByChannelsWithAliases(currentModels, config);
     const configModels = config.models || [];
     
     const lines: string[] = ["Config vs models.json:", ""];
@@ -2260,7 +2781,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     ctx.ui.notify(lines.join("\n"), "info");
   } else {
     ctx.ui.notify(
-      "pi-router v0.3.2\n\n" +
+      "pi-router v0.4.0\n\n" +
       "Commands:\n" +
       "  /router config    - Configuration management\n" +
       "  /router status    - Show router status\n" +
@@ -2379,7 +2900,7 @@ async function collectTextResponseFromModel(
   const requestOptions: SimpleStreamOptions | undefined = maxTokens > 0
     ? { maxTokens }
     : undefined;
-  const stream = forwardToProvider(model, context, requestOptions, config);
+  const stream = forwardToProvider(model, context, requestOptions, config, undefined, false);
 
   let text = "";
   let tokensUsed = 0;
@@ -2599,6 +3120,8 @@ type RouterState = {
   currentModelProvider?: string;
   currentThinkingLevel?: string;
   currentSessionManager?: any;
+  currentSessionHash?: string;
+  currentRouterModelId?: string;
   currentGetContextUsage?: (() => { tokens: number | null; contextWindow: number; percent: number | null } | undefined);
   currentModelRegistry?: any;
   customFooterInstalled?: boolean;
@@ -2607,18 +3130,24 @@ type RouterState = {
   lastStatusUpdate?: {
     modelId: string;           // router model ID (e.g., "claude-fable-5" or "auto")
     channel: string;           // actual channel used (e.g., "lan")
-    actualModelId?: string;    // actual model ID (only for auto mode)
+    actualModelId?: string;    // actual upstream model ID when it differs or auto/fallback mode is active
+    api?: string;
     phase: RouterStatusPhase;
     attemptedChannels?: string[];
     error?: string;
     timestamp: number;
   };  // last active routing info
+  activeRouteSnapshots: Map<string, PiRouteSnapshot>; // route key -> latest route snapshot
+  routeListeners: Set<(event: PiRouteSnapshot) => void>;
+  unregisterRoutingAdapter?: () => void;
 };
 
 const routerState: RouterState = {
   activeChannels: new Map(),
   cooldowns: new Map(),
   lastFailures: new Map(),
+  activeRouteSnapshots: new Map(),
+  routeListeners: new Set(),
 };
 
 // FIX #1, #10: Cache modelMap to avoid rebuilding on every request
@@ -2662,12 +3191,12 @@ function getCachedModelMap(modelRegistry?: any): Map<string, PiModel> {
 function findFirstConfiguredModel(
   configModel: RouterModelConfig,
   modelMap: Map<string, PiModel>
-): { channel: string; model: PiModel } | undefined {
+): { channel: string; model: PiModel; upstreamId: string } | undefined {
   // Try channels in configured order
   for (const channel of configModel.channels) {
-    const model = modelMap.get(`${configModel.id}@${channel}`);
-    if (model) {
-      return { channel, model };
+    const route = resolveConfiguredRoute(configModel, channel, modelMap);
+    if (route) {
+      return { channel, model: route.model, upstreamId: route.upstreamId };
     }
   }
   return undefined;
@@ -2750,12 +3279,8 @@ function registerRouterProvider(
     return;
   }
 
-  // Build a map of all available models by id@provider
-  const modelMap = new Map<string, PiModel>();
-  for (const model of allModels) {
-    const key = `${model.id}@${model.provider}`;
-    modelMap.set(key, model);
-  }
+  // Build a map of all available real models by id@provider.
+  const modelMap = buildModelMap(allModels);
 
   const mirrorModels = createMirrorModels(configuredModels, modelMap);
 
@@ -2911,21 +3436,25 @@ async function relayAutoAttempt(
   attemptedRoutes: string[],
   attemptedChannels: string[]
 ): Promise<boolean> {
-  const key = `${modelConfig.id}@${channel}`;
-  attemptedRoutes.push(key);
-  attemptedChannels.push(key);
-  updateFooterStatus(routerModelId, channel, modelConfig.id, "trying", [...attemptedChannels]);
+  const canonicalKey = `${modelConfig.id}@${channel}`;
+  const upstreamKey = `${targetModel.id}@${channel}`;
+  const displayKey = upstreamKey === canonicalKey ? canonicalKey : `${canonicalKey} -> ${upstreamKey}`;
+  attemptedRoutes.push(displayKey);
+  attemptedChannels.push(displayKey);
+  updateRouteSnapshot(routerModelId, modelConfig.id, targetModel, "trying");
+  updateFooterStatus(routerModelId, channel, targetModel.id, "trying", [...attemptedChannels], undefined, targetModel.api);
 
   let stream: AssistantMessageEventStream;
   try {
-    stream = forwardToProvider(targetModel, context, options, config);
+    stream = forwardToProvider(targetModel, context, options, config, routerModelId);
   } catch (err) {
     const error = getErrorMessage(err);
     const aborted = isAbortError(error) || isAbortSignalAborted(options);
-    debugLog(`[pi-router] Auto mode failed to start ${key}:`, err);
+    debugLog(`[pi-router] Auto mode failed to start ${displayKey}:`, err);
 
+    updateRouteSnapshot(routerModelId, modelConfig.id, targetModel, "failed");
     if (aborted) {
-      updateFooterStatus(routerModelId, channel, modelConfig.id, "aborted", [...attemptedChannels], error);
+      updateFooterStatus(routerModelId, channel, targetModel.id, "aborted", [...attemptedChannels], error, targetModel.api);
       eventStream.push(createRouterErrorEvent(routerModelId, "router", ROUTER_API, error, "aborted"));
       eventStream.end();
       return true;
@@ -2934,14 +3463,14 @@ async function relayAutoAttempt(
     recordFailure(modelConfig.id, channel, error, config, modelConfig);
     updateHealthStatus(modelConfig.id, channel, false);
     recordCircuitOutcome(modelConfig.id, channel, false);
-    updateFooterStatus(routerModelId, channel, modelConfig.id, "failed", [...attemptedChannels], error);
+    updateFooterStatus(routerModelId, channel, targetModel.id, "failed", [...attemptedChannels], error, targetModel.api);
     return false;
   }
 
   logDecision({
     timestamp: Date.now(),
     modelId: "auto (router)",
-    selectedChannel: key,
+    selectedChannel: displayKey,
     attemptedChannels: [...attemptedRoutes],
     sortStrategy,
     fallbackUsed: false,
@@ -2961,7 +3490,8 @@ async function relayAutoAttempt(
       recordCircuitOutcome(modelConfig.id, channel, true);
       routerState.activeChannels.set(routerModelId, channel);
       updateStickyRecord(routerModelId, modelConfig.id, channel, config);
-      updateFooterStatus(routerModelId, channel, modelConfig.id, "success", [...attemptedChannels]);
+      updateRouteSnapshot(routerModelId, modelConfig.id, targetModel, "success");
+      updateFooterStatus(routerModelId, channel, targetModel.id, "success", [...attemptedChannels], undefined, targetModel.api);
     }
   );
 
@@ -2972,17 +3502,18 @@ async function relayAutoAttempt(
 
   const failedRelayResult = relayResult as Extract<RelayProviderStreamResult, { ok: false }>;
   const { error, aborted, committed } = failedRelayResult;
-  debugLog(`[pi-router] Auto mode failed on ${key}:`, error);
+  debugLog(`[pi-router] Auto mode failed on ${displayKey}:`, error);
 
+  updateRouteSnapshot(routerModelId, modelConfig.id, targetModel, "failed");
   if (aborted) {
-    updateFooterStatus(routerModelId, channel, modelConfig.id, "aborted", [...attemptedChannels], error);
+    updateFooterStatus(routerModelId, channel, targetModel.id, "aborted", [...attemptedChannels], error, targetModel.api);
     eventStream.push(createRouterErrorEvent(routerModelId, "router", ROUTER_API, error, "aborted"));
     eventStream.end();
     return true;
   }
 
   if (committed) {
-    updateFooterStatus(routerModelId, channel, modelConfig.id, "failed", [...attemptedChannels], error);
+    updateFooterStatus(routerModelId, channel, targetModel.id, "failed", [...attemptedChannels], error, targetModel.api);
     eventStream.push(createRouterErrorEvent(routerModelId, "router", ROUTER_API, formatUserFacingFailure(error)));
     eventStream.end();
     return true;
@@ -2991,7 +3522,7 @@ async function relayAutoAttempt(
   recordFailure(modelConfig.id, channel, error, config, modelConfig);
   updateHealthStatus(modelConfig.id, channel, false);
   recordCircuitOutcome(modelConfig.id, channel, false);
-  updateFooterStatus(routerModelId, channel, modelConfig.id, "failed", [...attemptedChannels], error);
+  updateFooterStatus(routerModelId, channel, targetModel.id, "failed", [...attemptedChannels], error, targetModel.api);
   return false;
 }
 
@@ -3015,8 +3546,9 @@ function routeAutoChannelFirst(
       // Try sticky route first if available
       if (stickyRecord) {
         const stickyKey = `${stickyRecord.modelId}@${stickyRecord.channel}`;
-        const stickyModel = modelMap.get(stickyKey);
         const stickyModelConfig = configuredModels.find(m => m.id === stickyRecord.modelId);
+        const stickyRoute = stickyModelConfig ? resolveConfiguredRoute(stickyModelConfig, stickyRecord.channel, modelMap) : undefined;
+        const stickyModel = stickyRoute?.model;
         
         if (stickyModel && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
           debugLog(`[pi-router] Auto mode: trying sticky ${stickyKey}`);
@@ -3051,7 +3583,8 @@ function routeAutoChannelFirst(
         
         for (const channel of channelOrder) {
           const key = `${modelConfig.id}@${channel}`;
-          const targetModel = modelMap.get(key);
+          const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
+          const targetModel = route?.model;
 
           if (!targetModel) {
             debugLog(`[pi-router] Auto mode: ${key} not found in modelMap`);
@@ -3131,8 +3664,9 @@ function routeAutoCustom(
       // Try sticky route first if available
       if (stickyRecord) {
         const stickyKey = `${stickyRecord.modelId}@${stickyRecord.channel}`;
-        const stickyModel = modelMap.get(stickyKey);
         const stickyModelConfig = config.models?.find(m => m.id === stickyRecord.modelId);
+        const stickyRoute = stickyModelConfig ? resolveConfiguredRoute(stickyModelConfig, stickyRecord.channel, modelMap) : undefined;
+        const stickyModel = stickyRoute?.model;
 
         if (stickyModel && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
           debugLog(`[pi-router] Auto mode: trying sticky ${stickyKey}`);
@@ -3169,8 +3703,9 @@ function routeAutoCustom(
         }
 
         const key = `${modelId}@${channel}`;
-        const targetModel = modelMap.get(key);
         const modelConfig = config.models?.find(m => m.id === modelId) || { id: modelId, channels: [channel] };
+        const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
+        const targetModel = route?.model;
 
         if (!targetModel) {
           debugLog(`[pi-router] Auto mode: ${key} not found in modelMap`);
@@ -3232,6 +3767,7 @@ function routeRequest(
   modelMap: Map<string, PiModel>
 ): AssistantMessageEventStream {
   const modelId = routerModel.id;
+  routerState.currentRouterModelId = modelId;
   
   // Special handling for "auto" meta-model (auto mode)
   if (modelId === "auto") {
@@ -3634,10 +4170,15 @@ function forwardToProvider(
   model: PiModel,
   context: Context,
   options?: SimpleStreamOptions,
-  config?: RouterConfig
+  config?: RouterConfig,
+  virtualModelId?: string,
+  useCacheHints = true
 ): AssistantMessageEventStream {
   const realModel = toPiAiModel(model);
-  const routedOptions = applyRouterRequestOptions(options, config);
+  const hintedRequest = useCacheHints
+    ? applyCacheHintsToRequest(context, options, model, virtualModelId)
+    : { context, options };
+  const routedOptions = applyRouterRequestOptions(hintedRequest.options, config);
   const eventStream = createAssistantMessageEventStream();
   const linkedAbort = createLinkedAbortController(routedOptions?.signal);
   providerStreamAborters.set(eventStream, () => linkedAbort.controller.abort());
@@ -3663,7 +4204,7 @@ function forwardToProvider(
       delete providerOptions.timeoutMs;
       debugLog(`[pi-router] Forwarding to ${model.provider} streamSimple`);
 
-      const upstreamStream = streamSimple(realModel, context, providerOptions);
+      const upstreamStream = streamSimple(realModel, hintedRequest.context, providerOptions);
       for await (const event of upstreamStream) {
         eventStream.push(event);
       }
@@ -3743,7 +4284,7 @@ function createFailoverStream(
   const sortStrategy = modelConfig.sortBy || config.sortBy || "config";
   const eventStream = createAssistantMessageEventStream();
   
-  const tryNextChannel = (): { channel: string; stream: AssistantMessageEventStream } | null => {
+  const tryNextChannel = (): { channel: string; targetModel: PiModel; routeDisplay: string; stream: AssistantMessageEventStream } | null => {
     while (currentChannelIndex < channelOrder.length) {
       const channel = channelOrder[currentChannelIndex];
       currentChannelIndex++;
@@ -3764,38 +4305,42 @@ function createFailoverStream(
         continue;
       }
       
-      const targetModel = modelMap.get(key);
+      const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
+      const targetModel = route?.model;
       if (!targetModel) {
         debugLog(`[pi-router] Model not found: ${key}`);
         continue;
       }
+      const routeDisplay = targetModel.id === modelId ? channel : `${channel} -> ${targetModel.id}`;
       
-      debugLog(`[pi-router] Attempting ${channel}...`);
-      attemptedChannels.push(channel);
-      updateFooterStatus(modelId, channel, undefined, "trying", [...attemptedChannels]);
+      debugLog(`[pi-router] Attempting ${routeDisplay}...`);
+      attemptedChannels.push(routeDisplay);
+      updateRouteSnapshot(modelId, modelConfig.id, targetModel, "trying");
+      updateFooterStatus(modelId, channel, targetModel.id, "trying", [...attemptedChannels], undefined, targetModel.api);
 
       try {
-        const stream = forwardToProvider(targetModel, context, options, config);
-        debugLog(`[pi-router] Started stream on ${key}`);
+        const stream = forwardToProvider(targetModel, context, options, config, modelId);
+        debugLog(`[pi-router] Started stream on ${targetModel.id}@${channel}`);
 
         logDecision({
           timestamp: Date.now(),
           modelId,
-          selectedChannel: channel,
+          selectedChannel: routeDisplay,
           attemptedChannels: [...attemptedChannels],
           sortStrategy,
           fallbackUsed: false,
           reason: attemptedChannels.length === 1 ? "first choice" : `failover after ${attemptedChannels.length - 1} failures`,
         });
 
-        return { channel, stream };
+        return { channel, targetModel, routeDisplay, stream };
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
-        debugLog(`[pi-router] Failed to start stream on ${channel}:`, err);
+        debugLog(`[pi-router] Failed to start stream on ${routeDisplay}:`, err);
+        updateRouteSnapshot(modelId, modelConfig.id, targetModel, "failed");
         recordFailure(modelId, channel, error, config, modelConfig);
         updateHealthStatus(modelId, channel, false);
         recordCircuitOutcome(modelId, channel, false);
-        updateFooterStatus(modelId, channel, undefined, "failed", [...attemptedChannels], error);
+        updateFooterStatus(modelId, channel, targetModel.id, "failed", [...attemptedChannels], error, targetModel.api);
       }
     }
     
@@ -3804,6 +4349,8 @@ function createFailoverStream(
   
   const relayAttempt = async (
     channel: string,
+    targetModel: PiModel,
+    routeDisplay: string,
     stream: AssistantMessageEventStream
   ): Promise<RelayProviderStreamResult> => {
     const streamStartTime = Date.now();
@@ -3818,10 +4365,11 @@ function createFailoverStream(
         updateHealthStatus(modelId, channel, true);
         recordCircuitOutcome(modelId, channel, true);
         routerState.activeChannels.set(modelId, channel);
-        updateFooterStatus(modelId, channel, undefined, "success", [...attemptedChannels]);
+        updateRouteSnapshot(modelId, modelConfig.id, targetModel, "success");
+        updateFooterStatus(modelId, channel, targetModel.id, "success", [...attemptedChannels], undefined, targetModel.api);
   
         const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
-        if (lastDecision?.modelId === modelId && lastDecision.selectedChannel === channel) {
+        if (lastDecision?.modelId === modelId && lastDecision.selectedChannel === routeDisplay) {
           lastDecision.latencyMs = latency;
         }
       }
@@ -3845,24 +4393,25 @@ function createFailoverStream(
         return;
       }
       
-      const relayResult = await relayAttempt(attempt.channel, attempt.stream);
+      const relayResult = await relayAttempt(attempt.channel, attempt.targetModel, attempt.routeDisplay, attempt.stream);
       if (relayResult.ok) {
         eventStream.end();
         return;
       }
       
       const { error, aborted, committed } = relayResult as Extract<RelayProviderStreamResult, { ok: false }>;
-      debugLog(`[pi-router] Stream error on ${attempt.channel}:`, error);
+      debugLog(`[pi-router] Stream error on ${attempt.routeDisplay}:`, error);
 
+      updateRouteSnapshot(modelId, modelConfig.id, attempt.targetModel, "failed");
       if (aborted) {
-        updateFooterStatus(modelId, attempt.channel, undefined, "aborted", [...attemptedChannels], error);
+        updateFooterStatus(modelId, attempt.channel, attempt.targetModel.id, "aborted", [...attemptedChannels], error, attempt.targetModel.api);
         eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, error, "aborted"));
         eventStream.end();
         return;
       }
 
       if (committed) {
-        updateFooterStatus(modelId, attempt.channel, undefined, "failed", [...attemptedChannels], error);
+        updateFooterStatus(modelId, attempt.channel, attempt.targetModel.id, "failed", [...attemptedChannels], error, attempt.targetModel.api);
         eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, formatUserFacingFailure(error)));
         eventStream.end();
         return;
@@ -3871,7 +4420,7 @@ function createFailoverStream(
       recordFailure(modelId, attempt.channel, error, config, modelConfig);
       updateHealthStatus(modelId, attempt.channel, false);
       recordCircuitOutcome(modelId, attempt.channel, false);
-      updateFooterStatus(modelId, attempt.channel, undefined, "failed", [...attemptedChannels], error);
+      updateFooterStatus(modelId, attempt.channel, attempt.targetModel.id, "failed", [...attemptedChannels], error, attempt.targetModel.api);
     }
   })().catch((err) => {
     const error = err instanceof Error ? err.message : String(err);
@@ -4019,6 +4568,8 @@ async function tryModelFallback(
     const fallbackModelConfig: RouterModelConfig = {
       id: fallbackSpec.id,
       channels: fallbackChannels,
+      aliases: fallbackSpec.aliases,
+      modelByChannel: fallbackSpec.modelByChannel,
       sortBy: modelConfig.sortBy,
       failover: modelConfig.failover,
       sticky: false,
@@ -4027,8 +4578,12 @@ async function tryModelFallback(
     
     for (const channel of fallbackChannels) {
       const key = `${fallbackSpec.id}@${channel}`;
-      attemptedFallbackRoutes.push(key);
-      const targetModel = modelMap.get(key);
+      const fallbackRoute = resolveConfiguredRoute(fallbackModelConfig, channel, modelMap);
+      const targetModel = fallbackRoute?.model;
+      const routeDisplay = targetModel && targetModel.id !== fallbackSpec.id
+        ? `${key} -> ${targetModel.id}@${channel}`
+        : key;
+      attemptedFallbackRoutes.push(routeDisplay);
       
       if (!targetModel) {
         debugLog(`[pi-router] Fallback model not found: ${key}`);
@@ -4037,13 +4592,13 @@ async function tryModelFallback(
       }
       
       // Get primary model for context transfer
-      const primaryKey = `${modelId}@${modelConfig.channels[0]}`;
-      const primaryModel = modelMap.get(primaryKey);
+      const primaryConfigured = findFirstConfiguredModel(modelConfig, modelMap);
+      const primaryModel = primaryConfigured?.model;
       
       if (!primaryModel) {
-        const error = `Primary model not found for context transfer: ${primaryKey}`;
+        const error = `Primary model not found for context transfer: ${modelId}`;
         debugLog(`[pi-router] ${error}`);
-        fallbackFailures.push({ route: key, error });
+        fallbackFailures.push({ route: routeDisplay, error });
         continue;
       }
       
@@ -4110,12 +4665,13 @@ async function tryModelFallback(
         );
       }
       
-      debugLog(`[pi-router] Forwarding to fallback ${key}...`);
-      updateFooterStatus(modelId, channel, fallbackSpec.id, "fallback", [...attemptedFallbackRoutes]);
+      debugLog(`[pi-router] Forwarding to fallback ${routeDisplay}...`);
+      updateRouteSnapshot(modelId, fallbackSpec.id, targetModel, "trying");
+      updateFooterStatus(modelId, channel, targetModel.id, "fallback", [...attemptedFallbackRoutes], undefined, targetModel.api);
       logDecision({
         timestamp: Date.now(),
         modelId,
-        selectedChannel: key,
+        selectedChannel: routeDisplay,
         attemptedChannels: [...attemptedFallbackRoutes],
         sortStrategy: "fallback",
         fallbackUsed: true,
@@ -4124,7 +4680,7 @@ async function tryModelFallback(
       });
 
       const streamStartTime = Date.now();
-      const fallbackStream = forwardToProvider(targetModel, modifiedContext, options, config);
+      const fallbackStream = forwardToProvider(targetModel, modifiedContext, options, config, modelId);
       const relayResult = await relayProviderStream(
         fallbackStream,
         eventStream,
@@ -4136,10 +4692,11 @@ async function tryModelFallback(
           updateHealthStatus(fallbackSpec.id, channel, true);
           recordCircuitOutcome(fallbackSpec.id, channel, true);
           routerState.activeChannels.set(modelId, channel);
-          updateFooterStatus(modelId, channel, fallbackSpec.id, "success", [...attemptedFallbackRoutes]);
+          updateRouteSnapshot(modelId, fallbackSpec.id, targetModel, "success");
+          updateFooterStatus(modelId, channel, targetModel.id, "success", [...attemptedFallbackRoutes], undefined, targetModel.api);
 
           const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
-          if (lastDecision?.modelId === modelId && lastDecision.selectedChannel === key) {
+          if (lastDecision?.modelId === modelId && lastDecision.selectedChannel === routeDisplay) {
             lastDecision.latencyMs = latency;
           }
         }
@@ -4147,23 +4704,24 @@ async function tryModelFallback(
 
       if (relayResult.ok) {
         eventStream.end();
-        debugLog(`[pi-router] Successfully failed over to ${key}`);
+        debugLog(`[pi-router] Successfully failed over to ${routeDisplay}`);
         return;
       }
 
       const { error, aborted, committed } = relayResult as Extract<RelayProviderStreamResult, { ok: false }>;
-      fallbackFailures.push({ route: key, error });
-      debugLog(`[pi-router] Fallback failed on ${key}:`, error);
+      fallbackFailures.push({ route: routeDisplay, error });
+      debugLog(`[pi-router] Fallback failed on ${routeDisplay}:`, error);
 
+      updateRouteSnapshot(modelId, fallbackSpec.id, targetModel, "failed");
       if (aborted) {
-        updateFooterStatus(modelId, channel, fallbackSpec.id, "aborted", [...attemptedFallbackRoutes], error);
+        updateFooterStatus(modelId, channel, targetModel.id, "aborted", [...attemptedFallbackRoutes], error, targetModel.api);
         eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, error, "aborted"));
         eventStream.end();
         return;
       }
 
       if (committed) {
-        updateFooterStatus(modelId, channel, fallbackSpec.id, "failed", [...attemptedFallbackRoutes], error);
+        updateFooterStatus(modelId, channel, targetModel.id, "failed", [...attemptedFallbackRoutes], error, targetModel.api);
         eventStream.push(createRouterErrorEvent(modelId, "router", ROUTER_API, formatUserFacingFailure(error)));
         eventStream.end();
         return;
@@ -4172,7 +4730,7 @@ async function tryModelFallback(
       recordFailure(fallbackSpec.id, channel, error, config, fallbackModelConfig);
       updateHealthStatus(fallbackSpec.id, channel, false);
       recordCircuitOutcome(fallbackSpec.id, channel, false);
-      updateFooterStatus(modelId, channel, fallbackSpec.id, "failed", [...attemptedFallbackRoutes], error);
+      updateFooterStatus(modelId, channel, targetModel.id, "failed", [...attemptedFallbackRoutes], error, targetModel.api);
     }
   }
 
@@ -4697,7 +5255,8 @@ async function probeChannel(
     // FIX #15: Use cached modelMap instead of rebuilding
     const modelMap = getCachedModelMap(routerState.currentModelRegistry);
 
-    const targetModel = modelMap.get(key);
+    const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
+    const targetModel = route?.model;
 
     if (!targetModel) {
       throw new Error(`Model not found: ${key}`);
@@ -4718,7 +5277,7 @@ async function probeChannel(
     const stream = forwardToProvider(targetModel, probeContext, {
       timeoutMs: healthProber.timeoutMs,
       maxRetries: 0,
-    });
+    }, config, modelConfig.id, false);
     
     // Wait for first event
     let gotResponse = false;
@@ -4802,12 +5361,18 @@ function __testResetInternalState(): void {
   routerState.currentModelProvider = undefined;
   routerState.currentThinkingLevel = undefined;
   routerState.currentSessionManager = undefined;
+  routerState.currentSessionHash = undefined;
+  routerState.currentRouterModelId = undefined;
   routerState.currentGetContextUsage = undefined;
   routerState.currentModelRegistry = undefined;
   routerState.customFooterInstalled = undefined;
   routerState.customFooterEnabled = undefined;
   routerState.footerStatusLineEnabled = undefined;
   routerState.lastStatusUpdate = undefined;
+  routerState.activeRouteSnapshots.clear();
+  routerState.routeListeners.clear();
+  routerState.unregisterRoutingAdapter?.();
+  routerState.unregisterRoutingAdapter = undefined;
   latencyTracker.records.clear();
   healthChecker.status.clear();
   circuitBreaker.circuits.clear();
@@ -4850,6 +5415,10 @@ function __testSetPiConfigDir(configDir: string | null): void {
   fileHashCache.clear();
   configFileMtimeMs = null;
   currentRouterConfig = null;
+  routerState.activeRouteSnapshots.clear();
+  routerState.routeListeners.clear();
+  routerState.unregisterRoutingAdapter?.();
+  routerState.unregisterRoutingAdapter = undefined;
   autoSyncChecked = false;
   autoSyncConfig = null;
 }
@@ -4874,6 +5443,18 @@ function __testRefreshConfigFromDisk(): RouterConfig {
 
 function __testGetCachedModelMap(modelRegistry?: any): Map<string, PiModel> {
   return getCachedModelMap(modelRegistry);
+}
+
+function __testGetConfigurableModels(modelRegistry?: any, forceRefresh = false): PiModel[] {
+  return getConfigurableModels(modelRegistry, forceRefresh);
+}
+
+function __testGetSyncModels(): PiModel[] {
+  return getSyncModels();
+}
+
+function __testRegisterRoutingAdapter(): void {
+  registerRoutingAdapter();
 }
 
 function __testCalculateFileHash(filePath: string): string {
@@ -4932,6 +5513,8 @@ export {
   __testSaveConfig,
   __testRefreshConfigFromDisk,
   __testGetCachedModelMap,
+  __testGetConfigurableModels,
+  __testGetSyncModels,
+  __testRegisterRoutingAdapter,
   __testCalculateFileHash,
 };
-

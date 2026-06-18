@@ -9,6 +9,8 @@ import * as os from 'os';
 import {
   __testCalculateFileHash,
   __testGetCachedModelMap,
+  __testGetConfigurableModels,
+  __testGetSyncModels,
   __testLoadConfig,
   __testLoadModelsJson,
   __testRefreshConfigFromDisk,
@@ -137,6 +139,172 @@ describe('Performance Optimizations', () => {
     fs.utimesSync(path.join(testDir, 'models.json'), future, future);
 
     expect(Array.from(__testGetCachedModelMap().keys())).toEqual(['m2@Provider-A']);
+  });
+
+  it('prefers latest models.json for configurable models even when modelRegistry is stale', () => {
+    fs.writeFileSync(
+      path.join(testDir, 'auth.json'),
+      JSON.stringify({
+        'Provider-A': { type: 'api_key', key: 'sk-a' },
+        'wx-api': { type: 'api_key', key: 'sk-wx' },
+      }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'models.json'),
+      JSON.stringify({
+        providers: {
+          'Provider-A': {
+            models: [
+              {
+                id: 'm1',
+                name: 'm1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+          'wx-api': {
+            models: [
+              {
+                id: 'm1',
+                name: 'm1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    const staleRegistry = {
+      getAvailable: () => [
+        {
+          id: 'm1',
+          name: 'm1',
+          provider: 'Provider-A',
+          api: 'pi-router-test-api',
+          contextWindow: 100,
+          maxTokens: 10,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+      ],
+    };
+
+    expect(__testGetConfigurableModels(staleRegistry, true).map(model => `${model.id}@${model.provider}`)).toEqual([
+      'm1@Provider-A',
+      'm1@wx-api',
+    ]);
+  });
+
+  it('force refreshes configurable models even when models.json mtime does not advance', () => {
+    fs.writeFileSync(
+      path.join(testDir, 'auth.json'),
+      JSON.stringify({
+        'Provider-A': { type: 'api_key', key: 'sk-a' },
+        'wx-api': { type: 'api_key', key: 'sk-wx' },
+      }),
+      'utf-8',
+    );
+    const modelsPath = path.join(testDir, 'models.json');
+    fs.writeFileSync(
+      modelsPath,
+      JSON.stringify({
+        providers: {
+          'Provider-A': {
+            models: [
+              {
+                id: 'm1',
+                name: 'm1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    expect(__testGetConfigurableModels(undefined, true).map(model => `${model.id}@${model.provider}`)).toEqual([
+      'm1@Provider-A',
+    ]);
+
+    const initialMtime = fs.statSync(modelsPath).mtime;
+    fs.writeFileSync(
+      modelsPath,
+      JSON.stringify({
+        providers: {
+          'Provider-A': {
+            models: [
+              {
+                id: 'm1',
+                name: 'm1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+          'wx-api': {
+            models: [
+              {
+                id: 'm1',
+                name: 'm1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+        },
+      }),
+      'utf-8',
+    );
+    fs.utimesSync(modelsPath, initialMtime, initialMtime);
+
+    expect(__testGetConfigurableModels(undefined, true).map(model => `${model.id}@${model.provider}`)).toEqual([
+      'm1@Provider-A',
+      'm1@wx-api',
+    ]);
+  });
+
+  it('sync models only include explicit models.json entries and ignore auth-only builtin claude models', () => {
+    fs.writeFileSync(
+      path.join(testDir, 'auth.json'),
+      JSON.stringify({
+        anthropic: { type: 'oauth' },
+      }),
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'models.json'),
+      JSON.stringify({
+        providers: {
+          'Provider-A': {
+            models: [
+              {
+                id: 'm1',
+                name: 'm1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    const syncModels = __testGetSyncModels().map(model => `${model.id}@${model.provider}`);
+    expect(syncModels).toEqual(['m1@Provider-A']);
+    expect(syncModels.some(item => item.includes('claude'))).toBe(false);
   });
 
   it('refreshes router config from disk into the active config reference', () => {

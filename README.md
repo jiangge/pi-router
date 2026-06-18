@@ -40,7 +40,7 @@ English | [简体中文](./README.zh-CN.md)
 pi install npm:pi-router
 
 # Or from GitHub
-pi install git:github.com/jiangjilin/pi-router
+pi install git:github.com/jiangge/pi-router
 
 # Or from local directory (for development)
 pi install /path/to/pi-router
@@ -160,10 +160,13 @@ Shortcuts:
 ### Management
 
 ```text
-/router sync             # Check models.json changes
-/router sync accept      # Apply detected changes
+/router sync             # Check explicit models.json changes
+/router sync accept      # Apply explicit models.json changes
 /router diff             # Preview config differences
 ```
+
+`/router sync` only syncs providers and models explicitly declared in `models.json`.
+It does not import auth-only builtin models discovered from `auth.json`.
 
 ## How It Works
 
@@ -351,7 +354,11 @@ Optional dedicated summary AI configuration:
 ```json
 {
   "id": "example-model",
+  "aliases": ["Example-Model", "proxy/example-model"],
   "channels": ["Provider-A", "Provider-B"],
+  "modelByChannel": {
+    "Provider-B": "proxy/example-model"
+  },
   "sticky": true,
   "sortBy": "latency",
   "contextTransfer": "summary",
@@ -366,6 +373,15 @@ Optional dedicated summary AI configuration:
   }
 }
 ```
+
+Alias fields let one router-facing canonical model group provider-specific upstream model IDs without editing `models.json`:
+
+- `id` is the canonical `router/<id>` model selected in Pi
+- `aliases` lists upstream model IDs considered equivalent for sync/grouping
+- `modelByChannel[channel]` is the exact upstream model ID to send to that provider when it differs from `id`
+- if no `modelByChannel` entry exists, pi-router tries `id` and then aliases for that channel
+
+pi-router also exposes active routes through the optional `Symbol.for("pi.routing.registry.v1")` protocol and reads optional cache hints from `Symbol.for("pi.cache.hints.v1")`. This keeps integrations with cache/status extensions protocol-based while preserving true upstream assistant message metadata for cache statistics.
 
 ### Manual Editing
 
@@ -408,7 +424,7 @@ See [PERFORMANCE_OPTIMIZATION.md](PERFORMANCE_OPTIMIZATION.md) for details.
 pi remove npm:pi-router
 
 # git install
-pi remove git:github.com/jiangjilin/pi-router
+pi remove git:github.com/jiangge/pi-router
 
 # local install
 pi remove /path/to/pi-router

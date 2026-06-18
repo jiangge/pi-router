@@ -1,6 +1,6 @@
 {
   "name": "pi-router",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Intelligent routing layer for pi coding agent with multi-level failover, circuit breaker, and comprehensive observability",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -45,7 +45,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/jiangge/pi-router.git"
+    "url": "git+https://github.com/jiangge/pi-router.git"
   },
   "bugs": {
     "url": "https://github.com/jiangge/pi-router/issues"

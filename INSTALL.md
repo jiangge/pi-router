@@ -18,10 +18,10 @@ pi install npm:pi-router -l
 
 ```bash
 # Install from git
-pi install git:github.com/jiangjilin/pi-router
+pi install git:github.com/jiangge/pi-router
 
 # Or with specific version/tag
-pi install git:github.com/jiangjilin/pi-router@v0.3.0
+pi install git:github.com/jiangge/pi-router@v0.3.0
 ```
 
 ### From Local Directory (for development)
@@ -137,7 +137,7 @@ pi update
 pi remove npm:pi-router
 
 # Or for git installations
-pi remove git:github.com/jiangjilin/pi-router
+pi remove git:github.com/jiangge/pi-router
 
 # Or for local installations
 pi remove /path/to/pi-router
@@ -194,7 +194,7 @@ For contributors or local development:
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/jiangjilin/pi-router.git
+git clone https://github.com/jiangge/pi-router.git
 cd pi-router
 ```
 
