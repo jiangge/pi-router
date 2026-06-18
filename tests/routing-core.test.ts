@@ -436,6 +436,35 @@ describe('provider registration helpers', () => {
     ]);
   });
 
+  it('detects duplicate same-provider alias routes that require routes config', () => {
+    const diff = detectModelChanges(
+      {
+        models: [
+          {
+            id: 'deepseek-v4-flash',
+            aliases: ['oc/deepseek-v4-flash-free'],
+            channels: ['wx-api'],
+          },
+        ],
+      } as any,
+      [
+        { id: 'deepseek-v4-flash', provider: 'wx-api' } as any,
+        { id: 'oc/deepseek-v4-flash-free', provider: 'wx-api' } as any,
+      ],
+    );
+
+    expect(diff.added).toEqual([]);
+    expect(diff.removed).toEqual([]);
+    expect(diff.modified).toEqual([
+      {
+        id: 'deepseek-v4-flash',
+        channelsAdded: [],
+        channelsRemoved: [],
+        propsChanged: ['routes'],
+      },
+    ]);
+  });
+
   it('lets explicit provider models override provider-level headers and compat', () => {
     const models = expandProviderModels('custom-provider', {
       api: 'custom-api',
@@ -563,6 +592,86 @@ describe('request and event helpers', () => {
       maxRetryDelayMs: 789,
     });
     expect(configured?.timeoutMs).toBeUndefined();
+  });
+
+  it('routes duplicate same-provider route variants independently', async () => {
+    const attemptedModels: string[] = [];
+
+    registerApiProvider({
+      api: 'pi-router-duplicate-route-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model) => {
+        attemptedModels.push(model.id);
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          if (model.id === 'deepseek-v4-flash') {
+            stream.push({
+              type: 'error',
+              reason: 'error',
+              error: {
+                role: 'assistant',
+                content: [],
+                api: model.api,
+                provider: model.provider,
+                model: model.id,
+                usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+                stopReason: 'error',
+                errorMessage: 'Connection error.',
+                timestamp: Date.now(),
+              },
+            } as any);
+            stream.end();
+            return;
+          }
+
+          const message = {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'variant ok' }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+            stopReason: 'stop',
+            timestamp: Date.now(),
+          } as any;
+          stream.push({ type: 'text_delta', contentIndex: 0, delta: 'variant ok', partial: message } as any);
+          stream.push({ type: 'done', reason: 'stop', message } as any);
+          stream.end();
+        });
+        return stream;
+      },
+    } as any, 'pi-router-duplicate-route-test');
+
+    const stream = createFailoverStream(
+      'deepseek-v4-flash',
+      ['wx-api', 'wx-api#oc/deepseek-v4-flash-free'],
+      { messages: [] } as any,
+      undefined,
+      {} as any,
+      {
+        id: 'deepseek-v4-flash',
+        aliases: ['oc/deepseek-v4-flash-free'],
+        channels: ['wx-api'],
+        routes: [
+          { channel: 'wx-api' },
+          { channel: 'wx-api', model: 'oc/deepseek-v4-flash-free' },
+        ],
+      } as any,
+      new Map([
+        ['deepseek-v4-flash@wx-api', { id: 'deepseek-v4-flash', name: 'DeepSeek Flash', provider: 'wx-api', api: 'pi-router-duplicate-route-test-api' }],
+        ['oc/deepseek-v4-flash-free@wx-api', { id: 'oc/deepseek-v4-flash-free', name: 'DeepSeek Flash Free', provider: 'wx-api', api: 'pi-router-duplicate-route-test-api' }],
+      ]) as any,
+    );
+
+    const events: any[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(attemptedModels).toEqual(['deepseek-v4-flash', 'oc/deepseek-v4-flash-free']);
+    expect(events.at(-1)?.message).toMatchObject({
+      provider: 'wx-api',
+      model: 'oc/deepseek-v4-flash-free',
+    });
+    expect(__testGetInternalState().failures.get('deepseek-v4-flash')?.[0].channel).toBe('wx-api');
   });
 
   it('routes canonical aliases to upstream ids, publishes route snapshots, and forwards cache hints', async () => {

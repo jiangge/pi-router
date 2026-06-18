@@ -277,6 +277,112 @@ describe('config order adjustment helpers', () => {
     expect(ctx.notifications.at(-1)?.message).toContain('Order Updated');
   });
 
+  it('runs order wizard and preserves duplicate-provider routes in channel-first config', async () => {
+    const ctx = createInteractiveCtx([
+      ['c'],
+    ]);
+    const originalConfig = {
+      strategy: 'channelFirst',
+      sortBy: 'manual',
+      autoSync: false,
+      request: { timeoutMs: 1234 },
+      models: [
+        {
+          id: 'deepseek-v4-flash',
+          aliases: ['oc/deepseek-v4-flash-free'],
+          channels: ['wx-api'],
+          routes: [
+            { channel: 'wx-api' },
+            { channel: 'wx-api', model: 'oc/deepseek-v4-flash-free' },
+          ],
+        },
+      ],
+    } as any;
+    let savedConfig: any;
+
+    await runConfigOrderWizard(
+      ctx,
+      originalConfig,
+      () => [
+        { id: 'deepseek-v4-flash', provider: 'wx-api', baseUrl: 'https://agg.example.com/v1' },
+        { id: 'oc/deepseek-v4-flash-free', provider: 'wx-api', baseUrl: 'https://agg.example.com/v1' },
+      ],
+      (config) => {
+        savedConfig = config;
+      },
+    );
+
+    expect(savedConfig.models).toEqual([
+      {
+        id: 'deepseek-v4-flash',
+        aliases: ['oc/deepseek-v4-flash-free'],
+        channels: ['wx-api'],
+        routes: [
+          { channel: 'wx-api' },
+          { channel: 'wx-api', model: 'oc/deepseek-v4-flash-free' },
+        ],
+      },
+    ]);
+    expect(ctx.notifications.at(-1)?.message).toContain('Order Updated');
+  });
+
+  it('runs order wizard and saves customRoutes for duplicate-provider variants', async () => {
+    const ctx = createInteractiveCtx([
+      ['c'],
+    ]);
+    const originalConfig = {
+      strategy: 'custom',
+      sortBy: 'manual',
+      autoSync: false,
+      models: [
+        {
+          id: 'deepseek-v4-flash',
+          aliases: ['oc/deepseek-v4-flash-free'],
+          channels: ['wx-api'],
+          routes: [
+            { channel: 'wx-api' },
+            { channel: 'wx-api', model: 'oc/deepseek-v4-flash-free' },
+          ],
+        },
+      ],
+      customRoutes: [
+        { model: 'deepseek-v4-flash', channel: 'wx-api', upstreamModel: 'oc/deepseek-v4-flash-free' },
+        { model: 'deepseek-v4-flash', channel: 'wx-api' },
+      ],
+    } as any;
+    let savedConfig: any;
+
+    await runConfigOrderWizard(
+      ctx,
+      originalConfig,
+      () => [
+        { id: 'deepseek-v4-flash', provider: 'wx-api', baseUrl: 'https://agg.example.com/v1' },
+        { id: 'oc/deepseek-v4-flash-free', provider: 'wx-api', baseUrl: 'https://agg.example.com/v1' },
+      ],
+      (config) => {
+        savedConfig = config;
+      },
+    );
+
+    expect(savedConfig.customOrder).toEqual([
+      'deepseek-v4-flash@wx-api#oc/deepseek-v4-flash-free',
+      'deepseek-v4-flash@wx-api',
+    ]);
+    expect(savedConfig.customRoutes).toEqual([
+      { model: 'deepseek-v4-flash', channel: 'wx-api', upstreamModel: 'oc/deepseek-v4-flash-free' },
+      { model: 'deepseek-v4-flash', channel: 'wx-api' },
+    ]);
+    expect(savedConfig.models[0]).toMatchObject({
+      id: 'deepseek-v4-flash',
+      aliases: ['oc/deepseek-v4-flash-free'],
+      channels: ['wx-api'],
+      routes: [
+        { channel: 'wx-api' },
+        { channel: 'wx-api', model: 'oc/deepseek-v4-flash-free' },
+      ],
+    });
+  });
+
   it('builds editable models from current config order and appends discovered channels', () => {
     const editable = buildEditableModelsFromConfig(
       {
@@ -298,6 +404,38 @@ describe('config order adjustment helpers', () => {
     expect(editable[0].channels[0].reason).toBe('Third-party platform');
     expect(editable[0].channels[2].reason).toBe('Configured channel (currently unavailable)');
     expect(editable[1].channels[0].reason).toBe('Official API');
+  });
+
+  it('builds editable duplicate-provider routes with display-only upstream labels', () => {
+    const editable = buildEditableModelsFromConfig(
+      {
+        models: [
+          {
+            id: 'deepseek-v4-flash',
+            aliases: ['oc/deepseek-v4-flash-free'],
+            channels: ['wx-api'],
+            routes: [
+              { channel: 'wx-api' },
+              { channel: 'wx-api', model: 'oc/deepseek-v4-flash-free' },
+            ],
+          },
+        ],
+      } as any,
+      [
+        { id: 'deepseek-v4-flash', provider: 'wx-api', baseUrl: 'https://agg.example.com/v1' },
+        { id: 'oc/deepseek-v4-flash-free', provider: 'wx-api', baseUrl: 'https://agg.example.com/v1' },
+      ],
+    );
+
+    expect(editable[0].channels.map(channel => channel.channel)).toEqual(['wx-api', 'wx-api']);
+    expect(editable[0].channels.map(channel => channel.label)).toEqual([
+      'wx-api',
+      'wx-api (oc/deepseek-v4-flash-free)',
+    ]);
+    expect(editable[0].channels.map(channel => channel.routeKey)).toEqual([
+      'wx-api',
+      'wx-api#oc/deepseek-v4-flash-free',
+    ]);
   });
 
   it('keeps saved custom order and appends newly discovered pairs in flat editor', () => {
@@ -363,6 +501,36 @@ describe('config order adjustment helpers', () => {
     expect(editor.getResult()).toEqual(['m1@a', 'm1@b', 'm1@c']);
   });
 
+  it('keeps duplicate-provider variants distinct in flat custom editor', () => {
+    const editor = new FlatOrderEditor(
+      [
+        {
+          id: 'deepseek-v4-flash',
+          channels: [
+            { channel: 'wx-api', score: 50, reason: '第三方平台', category: 'aggregator', label: 'wx-api', routeKey: 'wx-api' },
+            {
+              channel: 'wx-api',
+              score: 50,
+              reason: '第三方平台',
+              category: 'aggregator',
+              label: 'wx-api (oc/deepseek-v4-flash-free)',
+              routeKey: 'wx-api#oc/deepseek-v4-flash-free',
+              upstreamModel: 'oc/deepseek-v4-flash-free',
+            },
+          ],
+        },
+      ],
+      theme,
+      ['deepseek-v4-flash@wx-api#oc/deepseek-v4-flash-free'],
+    );
+
+    expect(editor.render(80).join('\n')).toContain('deepseek-v4-flash@wx-api (oc/deepseek-v4-flash-free)');
+    expect(editor.getResult()).toEqual([
+      'deepseek-v4-flash@wx-api#oc/deepseek-v4-flash-free',
+      'deepseek-v4-flash@wx-api',
+    ]);
+  });
+
   it('supports basic two-tier editor completion and preserves configured order', () => {
     const editor = new TwoTierOrderEditor(
       [
@@ -386,6 +554,43 @@ describe('config order adjustment helpers', () => {
     expect(completed).toBe(true);
     expect(editor.render(80).join('\n')).toContain('Step 6/6');
     expect(editor.getResult()).toEqual([{ id: 'gpt-5.5', channels: ['xiaojimao', 'pipi'] }]);
+  });
+
+  it('serializes duplicate-provider variants as routes in two-tier editor', () => {
+    const editor = new TwoTierOrderEditor(
+      [
+        {
+          id: 'deepseek-v4-flash',
+          channels: [
+            { channel: 'wx-api', score: 50, reason: '第三方平台', category: 'aggregator', label: 'wx-api', routeKey: 'wx-api' },
+            {
+              channel: 'wx-api',
+              score: 50,
+              reason: '第三方平台',
+              category: 'aggregator',
+              label: 'wx-api (oc/deepseek-v4-flash-free)',
+              routeKey: 'wx-api#oc/deepseek-v4-flash-free',
+              upstreamModel: 'oc/deepseek-v4-flash-free',
+            },
+          ],
+        },
+      ],
+      theme,
+    );
+
+    expect(editor.render(80).join('\n')).toContain('2 channels');
+    editor.handleInput(key.tab);
+    expect(editor.render(80).join('\n')).toContain('wx-api (oc/deepseek-v4-flash-free)');
+    expect(editor.getResult()).toEqual([
+      {
+        id: 'deepseek-v4-flash',
+        channels: ['wx-api'],
+        routes: [
+          { channel: 'wx-api' },
+          { channel: 'wx-api', model: 'oc/deepseek-v4-flash-free' },
+        ],
+      },
+    ]);
   });
 
   it('restores cancelled two-tier model and channel moves', () => {

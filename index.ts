@@ -15,6 +15,16 @@ import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
 import { runConfigOrderWizard, runConfigWizard } from "./config-wizard-flow.js";
+import {
+  getModelRouteEntries,
+  getRouteDisplayLabel,
+  getRouteSignature,
+  makeRouteKey,
+  serializeRouteEntriesForConfig,
+  type RouterCustomRouteConfig,
+  type RouterRouteConfig,
+  type RouterRouteEntry,
+} from "./router-routes.js";
 
 const PI_ROUTER_DEBUG = process.env.PI_ROUTER_DEBUG === "1";
 const ROUTER_API = "pi-router" as Api;
@@ -111,6 +121,7 @@ type RouterConfig = {
    */
   modelAliases?: Record<string, string[]>;
   customOrder?: string[];  // For custom strategy: array of "modelId@channel" strings
+  customRoutes?: RouterCustomRouteConfig[];  // For duplicate provider/model-variant routes in custom strategy
   failover?: {
     on?: string[];
     cooldownMs?: number;
@@ -150,6 +161,10 @@ type RouterConfig = {
 type StickyRecord = {
   modelId: string;  // Actual routed model ID
   channel: string;  // Actual routed channel
+  /** Distinguishes same-provider routes with different upstream model names. */
+  routeKey?: string;
+  /** Exact upstream model id for this route when it differs from modelId. */
+  upstreamModelId?: string;
   successCount: number;  // Consecutive success count
   lastSuccess: number;  // Timestamp of last success
   lastUpdate: number;  // Timestamp of last update
@@ -158,6 +173,8 @@ type StickyRecord = {
 type RouterModelConfig = {
   id: string;
   channels: string[];
+  /** Optional route list; needed when the same provider appears with multiple upstream model IDs. */
+  routes?: RouterRouteConfig[];
   sortBy?: "config" | "latency" | "cost";
   failover?: {
     on?: string[];
@@ -166,6 +183,8 @@ type RouterModelConfig = {
   fallbackModels?: Array<{
     id: string;
     channels: string[];
+    /** Optional route list for duplicate provider/model-variant fallback routes. */
+    routes?: RouterRouteConfig[];
     /** Upstream model IDs considered equivalent to this fallback id. */
     aliases?: string[];
     /** Per-channel upstream model id when it differs from the canonical id. */
@@ -346,7 +365,7 @@ function estimateRequestCost(
  * Diff types for models.json changes
  */
 type ModelDiff = {
-  added: Array<{ id: string; channels: string[]; aliases?: string[]; modelByChannel?: Record<string, string> }>;
+  added: Array<{ id: string; channels: string[]; aliases?: string[]; modelByChannel?: Record<string, string>; routes?: RouterRouteConfig[] }>;
   removed: Array<{ id: string; channels: string[] }>;
   modified: Array<{
     id: string;
@@ -859,6 +878,9 @@ type ResolvedModelRoute = {
   canonicalId: string;
   upstreamId: string;
   channel: string;
+  routeKey: string;
+  routeLabel: string;
+  routeEntry: RouterRouteEntry;
   model: PiModel;
 };
 
@@ -866,6 +888,7 @@ type ModelAliasGroup = {
   channels: string[];
   aliases: string[];
   modelByChannel: Record<string, string>;
+  routes: RouterRouteConfig[];
 };
 
 function normalizeModelAliasId(id: string): string {
@@ -923,7 +946,7 @@ function resolveCanonicalModelId(modelId: string, config?: RouterConfig): string
   return buildModelAliasLookup(config).get(normalizeModelAliasId(modelId)) || modelId;
 }
 
-function getCandidateUpstreamModelIds(modelConfig: Pick<RouterModelConfig, "id" | "aliases" | "modelByChannel">, channel: string): string[] {
+function getCandidateUpstreamModelIds(modelConfig: Pick<RouterModelConfig, "id" | "aliases" | "modelByChannel" | "routes">, channel: string): string[] {
   const candidates: string[] = [];
   const addCandidate = (id: unknown) => {
     if (typeof id !== "string") return;
@@ -932,6 +955,9 @@ function getCandidateUpstreamModelIds(modelConfig: Pick<RouterModelConfig, "id" 
     candidates.push(trimmed);
   };
 
+  for (const route of getModelRouteEntries(modelConfig)) {
+    if (route.channel === channel) addCandidate(route.upstreamModelId);
+  }
   addCandidate(modelConfig.modelByChannel?.[channel]);
   addCandidate(modelConfig.id);
   for (const alias of modelConfig.aliases || []) addCandidate(alias);
@@ -940,8 +966,50 @@ function getCandidateUpstreamModelIds(modelConfig: Pick<RouterModelConfig, "id" 
   return candidates;
 }
 
-function getUpstreamModelId(modelConfig: Pick<RouterModelConfig, "id" | "aliases" | "modelByChannel">, channel: string): string {
+function getUpstreamModelId(modelConfig: Pick<RouterModelConfig, "id" | "aliases" | "modelByChannel" | "routes">, channel: string): string {
   return getCandidateUpstreamModelIds(modelConfig, channel)[0] || modelConfig.id;
+}
+
+function resolveConfiguredRouteByEntry(
+  modelConfig: RouterModelConfig,
+  routeEntry: RouterRouteEntry,
+  modelMap: Map<string, PiModel>
+): ResolvedModelRoute | undefined {
+  const candidates: string[] = [];
+  const addCandidate = (id: unknown) => {
+    if (typeof id !== "string") return;
+    const trimmed = id.trim();
+    if (!trimmed || candidates.includes(trimmed)) return;
+    candidates.push(trimmed);
+  };
+  addCandidate(routeEntry.upstreamModelId);
+  // Legacy/simple routes without an explicit model can still fall back through aliases.
+  if (!routeEntry.explicitModel) {
+    for (const alias of getCandidateUpstreamModelIds(modelConfig, routeEntry.channel)) addCandidate(alias);
+  }
+
+  for (const upstreamId of candidates) {
+    const targetModel = modelMap.get(`${upstreamId}@${routeEntry.channel}`);
+    if (targetModel) {
+      const resolvedEntry: RouterRouteEntry = {
+        ...routeEntry,
+        upstreamModelId: targetModel.id,
+        routeKey: makeRouteKey(routeEntry.channel, targetModel.id, modelConfig.id),
+      };
+      resolvedEntry.label = getRouteDisplayLabel(resolvedEntry);
+      return {
+        canonicalId: modelConfig.id,
+        upstreamId: targetModel.id,
+        channel: routeEntry.channel,
+        routeKey: resolvedEntry.routeKey,
+        routeLabel: resolvedEntry.label,
+        routeEntry: resolvedEntry,
+        model: targetModel,
+      };
+    }
+  }
+
+  return undefined;
 }
 
 function resolveConfiguredRoute(
@@ -949,19 +1017,32 @@ function resolveConfiguredRoute(
   channel: string,
   modelMap: Map<string, PiModel>
 ): ResolvedModelRoute | undefined {
-  for (const upstreamId of getCandidateUpstreamModelIds(modelConfig, channel)) {
-    const targetModel = modelMap.get(`${upstreamId}@${channel}`);
-    if (targetModel) {
-      return {
-        canonicalId: modelConfig.id,
-        upstreamId,
-        channel,
-        model: targetModel,
-      };
-    }
+  const routeEntries = getModelRouteEntries(modelConfig).filter(route => route.channel === channel);
+  for (const routeEntry of routeEntries) {
+    const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
+    if (route) return route;
   }
 
-  return undefined;
+  // Fallback for ad-hoc customOrder items not present in routes/channels.
+  const fallbackEntry: RouterRouteEntry = {
+    modelId: modelConfig.id,
+    channel,
+    upstreamModelId: modelConfig.modelByChannel?.[channel] || modelConfig.id,
+    routeKey: makeRouteKey(channel, modelConfig.modelByChannel?.[channel], modelConfig.id),
+    label: channel,
+    explicitModel: !!modelConfig.modelByChannel?.[channel],
+  };
+  fallbackEntry.label = getRouteDisplayLabel(fallbackEntry);
+  return resolveConfiguredRouteByEntry(modelConfig, fallbackEntry, modelMap);
+}
+
+function resolveConfiguredRouteByKey(
+  modelConfig: RouterModelConfig,
+  routeKey: string,
+  modelMap: Map<string, PiModel>
+): ResolvedModelRoute | undefined {
+  const route = getModelRouteEntries(modelConfig).find(entry => entry.routeKey === routeKey || entry.channel === routeKey);
+  return route ? resolveConfiguredRouteByEntry(modelConfig, route, modelMap) : resolveConfiguredRoute(modelConfig, routeKey, modelMap);
 }
 
 function getConfiguredModel(
@@ -973,7 +1054,7 @@ function getConfiguredModel(
 }
 
 function createEmptyAliasGroup(): ModelAliasGroup {
-  return { channels: [], aliases: [], modelByChannel: {} };
+  return { channels: [], aliases: [], modelByChannel: {}, routes: [] };
 }
 
 function groupModelsByChannelsWithAliases(
@@ -992,8 +1073,18 @@ function groupModelsByChannelsWithAliases(
     if (!group.channels.includes(model.provider)) {
       group.channels.push(model.provider);
     }
+    const route: RouterRouteConfig = {
+      channel: model.provider,
+      ...(model.id !== canonicalId ? { model: model.id } : {}),
+    };
+    const routeSignature = `${route.channel}\u0000${route.model || canonicalId}`;
+    if (!group.routes.some(existing => `${existing.channel}\u0000${existing.model || canonicalId}` === routeSignature)) {
+      group.routes.push(route);
+    }
     if (model.id !== canonicalId) {
-      group.modelByChannel[model.provider] = model.id;
+      if (!group.modelByChannel[model.provider]) {
+        group.modelByChannel[model.provider] = model.id;
+      }
       addModelAlias(group.aliases, model.id, canonicalId);
     }
   }
@@ -1005,11 +1096,16 @@ function createRouterModelConfigFromGroup(
   id: string,
   group: ModelAliasGroup
 ): RouterModelConfig {
+  const serialized = serializeRouteEntriesForConfig(
+    id,
+    group.routes.map(route => ({ channel: route.channel, upstreamModelId: route.model || id }))
+  );
   return {
     id,
     ...(group.aliases.length > 0 ? { aliases: group.aliases } : {}),
-    channels: group.channels,
-    ...(Object.keys(group.modelByChannel).length > 0 ? { modelByChannel: group.modelByChannel } : {}),
+    channels: serialized.channels,
+    ...(serialized.modelByChannel ? { modelByChannel: serialized.modelByChannel } : {}),
+    ...(serialized.routes ? { routes: serialized.routes } : {}),
   };
 }
 
@@ -1035,6 +1131,7 @@ function detectModelChanges(config: RouterConfig, currentModels: PiModel[]): Mod
         channels: group.channels,
         ...(group.aliases.length > 0 ? { aliases: group.aliases } : {}),
         ...(Object.keys(group.modelByChannel).length > 0 ? { modelByChannel: group.modelByChannel } : {}),
+        ...(group.routes.length > group.channels.length ? { routes: group.routes } : {}),
       });
     }
   }
@@ -1049,9 +1146,20 @@ function detectModelChanges(config: RouterConfig, currentModels: PiModel[]): Mod
       const channelsAdded = currentGroup.channels.filter(c => !configModel.channels.includes(c));
       const channelsRemoved = configModel.channels.filter(c => !currentGroup.channels.includes(c));
       const missingAliases = currentGroup.aliases.filter(alias => !(configModel.aliases || []).includes(alias));
-      const modelByChannelChanged = !recordsEqual(configModel.modelByChannel, currentGroup.modelByChannel);
+      const serializedGroup = serializeRouteEntriesForConfig(
+        configModel.id,
+        currentGroup.routes.map(route => ({ channel: route.channel, upstreamModelId: route.model || configModel.id }))
+      );
+      const routesChanged = !routesEqual(getModelRouteEntries(configModel), getModelRouteEntries({
+        id: configModel.id,
+        channels: serializedGroup.channels,
+        modelByChannel: serializedGroup.modelByChannel,
+        routes: serializedGroup.routes,
+      }));
+      const modelByChannelChanged = !serializedGroup.routes && !recordsEqual(configModel.modelByChannel, serializedGroup.modelByChannel);
       const propsChanged = [
         ...(missingAliases.length > 0 ? ["aliases"] : []),
+        ...(routesChanged && serializedGroup.routes ? ["routes"] : []),
         ...(modelByChannelChanged ? ["modelByChannel"] : []),
       ];
       
@@ -1094,6 +1202,13 @@ function aliasesEqual(a: string[] | undefined, b: string[] | undefined): boolean
 
 function recordsEqual(a: Record<string, string> | undefined, b: Record<string, string> | undefined): boolean {
   return JSON.stringify(normalizeRecord(a)) === JSON.stringify(normalizeRecord(b));
+}
+
+function routesEqual(a: RouterRouteEntry[], b: RouterRouteEntry[]): boolean {
+  const normalize = (routes: RouterRouteEntry[]) => routes
+    .map(route => ({ channel: route.channel, upstreamModelId: route.upstreamModelId || route.modelId }))
+    .sort((left, right) => left.channel.localeCompare(right.channel) || left.upstreamModelId.localeCompare(right.upstreamModelId));
+  return JSON.stringify(normalize(a)) === JSON.stringify(normalize(b));
 }
 
 let configFileMtimeMs: number | null = null;
@@ -1218,8 +1333,9 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
       : {}),
     _comment_models: "模型配置: id 是 router/<id> 的 canonical 名；aliases/modelByChannel 可把不同上游模型名归并到同一模型；channels 从左到右依次尝试；fallbackModels 为模型级降级链",
     models: config.models ?? [],
-    _comment_customOrder: "自定义顺序(仅 custom 策略): model@channel 二元组数组，按此顺序尝试",
+    _comment_customOrder: "自定义顺序(仅 custom 策略): model@channel 二元组数组，按此顺序尝试；customRoutes 用于区分同 provider 的模型名变种",
     ...(config.customOrder ? { customOrder: config.customOrder } : {}),
+    ...(config.customRoutes ? { customRoutes: config.customRoutes } : {}),
     ...(config.request ? { _comment_request: "请求控制: timeoutMs / maxRetries / maxRetryDelayMs / maxTokens", request: config.request } : {}),
     _comment_footer: "底部状态栏: rightAlignRoute 默认 true(替换 footer 并右对齐路由状态)；statusLine 默认 true(禁用替换时仍显示简短状态)",
     footer: config.footer ?? { rightAlignRoute: true, statusLine: true },
@@ -1355,7 +1471,7 @@ function showCurrentConfig(ctx: any, config: RouterConfig): void {
   if (config.models && config.models.length > 0) {
     config.models.forEach(m => {
       lines.push(`  ${m.id}`);
-      lines.push(`    通道: ${m.channels.join(" → ")}`);
+      lines.push(`    通道: ${getModelRouteEntries(m).map(route => route.label).join(" → ")}`);
       if (m.fallbackModels && m.fallbackModels.length > 0) {
         lines.push(`    降级: ${m.fallbackModels.map(f => f.id).join(" → ")}`);
       }
@@ -1688,16 +1804,16 @@ function resolveCandidateRouteSnapshots(virtualModelId: string): PiRouteSnapshot
 
   const modelMap = getCachedModelMap(routerState.currentModelRegistry);
   const snapshots: PiRouteSnapshot[] = [];
-  const appendSnapshot = (routerModelId: string, modelConfig: RouterModelConfig, channel: string) => {
-    const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
+  const appendSnapshot = (routerModelId: string, modelConfig: RouterModelConfig, routeEntry: RouterRouteEntry) => {
+    const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
     if (!route) return;
     snapshots.push(buildRouteSnapshot(routerModelId, modelConfig.id, route.model, "planned", undefined, 0));
   };
 
   if (virtualModelId === "auto") {
     for (const modelConfig of config.models || []) {
-      for (const channel of modelConfig.channels) {
-        appendSnapshot("auto", modelConfig, channel);
+      for (const routeEntry of getModelRouteEntries(modelConfig)) {
+        appendSnapshot("auto", modelConfig, routeEntry);
       }
     }
     return snapshots;
@@ -1705,8 +1821,8 @@ function resolveCandidateRouteSnapshots(virtualModelId: string): PiRouteSnapshot
 
   const modelConfig = findConfiguredModelById(config, virtualModelId);
   if (!modelConfig) return [];
-  for (const channel of modelConfig.channels) {
-    appendSnapshot(virtualModelId, modelConfig, channel);
+  for (const routeEntry of getModelRouteEntries(modelConfig)) {
+    appendSnapshot(virtualModelId, modelConfig, routeEntry);
   }
   return snapshots;
 }
@@ -2371,7 +2487,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     if (models.length === 0) {
       ctx.ui.notify("No models configured. Run '/router sync' to auto-discover.", "info");
     } else {
-      const lines = models.map(m => `  ${m.id}: ${m.channels.join(", ")}`);
+      const lines = models.map(m => `  ${m.id}: ${getModelRouteEntries(m).map(route => route.label).join(", ")}`);
       ctx.ui.notify(
         `Configured models (${models.length}):\n\n` + lines.join("\n"),
         "info"
@@ -2593,20 +2709,25 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
         const model = config.models.find(m => m.id === modified.id);
         const group = currentGroups.get(modified.id);
         if (model && group) {
-          // Merge channels
-          const allChannels = new Set([...model.channels, ...modified.channelsAdded]);
-          modified.channelsRemoved.forEach(c => allChannels.delete(c));
-          model.channels = Array.from(allChannels);
+          const existingRoutes = getModelRouteEntries(model);
+          const groupRoutes = group.routes.map(route => ({
+            channel: route.channel,
+            upstreamModelId: route.model || model.id,
+          }));
+          const currentSignatures = new Set(groupRoutes.map(route => `${route.channel}\u0000${route.upstreamModelId}`));
+          const mergedRoutes = [
+            ...existingRoutes
+              .filter(route => currentSignatures.has(`${route.channel}\u0000${route.upstreamModelId}`))
+              .map(route => ({ channel: route.channel, upstreamModelId: route.upstreamModelId })),
+            ...groupRoutes,
+          ];
+          const serialized = serializeRouteEntriesForConfig(model.id, mergedRoutes);
+          model.channels = serialized.channels;
+          if (serialized.modelByChannel) model.modelByChannel = serialized.modelByChannel;
+          else delete model.modelByChannel;
+          if (serialized.routes) model.routes = serialized.routes;
+          else delete model.routes;
           model.aliases = [...new Set([...(model.aliases || []), ...group.aliases])];
-          model.modelByChannel = {};
-          for (const channel of model.channels) {
-            const upstreamId = group.modelByChannel[channel];
-            if (!upstreamId || upstreamId === model.id) continue;
-            model.modelByChannel[channel] = upstreamId;
-          }
-          if (Object.keys(model.modelByChannel).length === 0) {
-            delete model.modelByChannel;
-          }
           if (model.aliases.length === 0) {
             delete model.aliases;
           }
@@ -3191,12 +3312,13 @@ function getCachedModelMap(modelRegistry?: any): Map<string, PiModel> {
 function findFirstConfiguredModel(
   configModel: RouterModelConfig,
   modelMap: Map<string, PiModel>
-): { channel: string; model: PiModel; upstreamId: string } | undefined {
-  // Try channels in configured order
-  for (const channel of configModel.channels) {
-    const route = resolveConfiguredRoute(configModel, channel, modelMap);
+): { channel: string; routeKey: string; model: PiModel; upstreamId: string } | undefined {
+  // Try configured routes in order. This preserves duplicate same-provider routes
+  // such as `wx-api` and `wx-api (oc/deepseek-v4-flash-free)`.
+  for (const routeEntry of getModelRouteEntries(configModel)) {
+    const route = resolveConfiguredRouteByEntry(configModel, routeEntry, modelMap);
     if (route) {
-      return { channel, model: route.model, upstreamId: route.upstreamId };
+      return { channel: route.channel, routeKey: route.routeKey, model: route.model, upstreamId: route.upstreamId };
     }
   }
   return undefined;
@@ -3355,8 +3477,12 @@ function routeAutoMode(
 /**
  * Check if a channel can be attempted (cooldown + circuit breaker)
  */
-function canTryAutoChannel(modelId: string, channel: string): boolean {
-  const key = `${modelId}@${channel}`;
+function getRouteStateKey(modelId: string, routeKey: string): string {
+  return `${modelId}@${routeKey}`;
+}
+
+function canTryAutoChannel(modelId: string, channel: string, routeKey = channel): boolean {
+  const key = getRouteStateKey(modelId, routeKey);
   
   // Check cooldown
   const cooldownEnd = routerState.cooldowns.get(key);
@@ -3365,13 +3491,13 @@ function canTryAutoChannel(modelId: string, channel: string): boolean {
   }
   
   // Check circuit breaker
-  return canAttemptChannel(modelId, channel);
+  return canAttemptChannel(modelId, routeKey);
 }
 
 /**
  * Update sticky record on successful route
  */
-function updateStickyRecord(routerModelId: string, modelId: string, channel: string, config: RouterConfig): void {
+function updateStickyRecord(routerModelId: string, modelId: string, channel: string, config: RouterConfig, routeKey = channel, upstreamModelId?: string): void {
   if (config.sticky === false) return;
   
   if (!config.stickyRecords) {
@@ -3381,16 +3507,20 @@ function updateStickyRecord(routerModelId: string, modelId: string, channel: str
   const existing = config.stickyRecords[routerModelId];
   const now = Date.now();
   
-  if (existing && existing.modelId === modelId && existing.channel === channel) {
+  if (existing && existing.modelId === modelId && existing.channel === channel && (existing.routeKey || existing.channel) === routeKey) {
     // Same route, increment success count
     existing.successCount++;
     existing.lastSuccess = now;
     existing.lastUpdate = now;
+    existing.routeKey = routeKey;
+    existing.upstreamModelId = upstreamModelId;
   } else {
     // New route
     config.stickyRecords[routerModelId] = {
       modelId,
       channel,
+      routeKey,
+      upstreamModelId,
       successCount: 1,
       lastSuccess: now,
       lastUpdate: now,
@@ -3425,8 +3555,7 @@ function scheduleStickyPersist(config: RouterConfig): void {
 async function relayAutoAttempt(
   routerModelId: string,
   modelConfig: RouterModelConfig,
-  channel: string,
-  targetModel: PiModel,
+  route: ResolvedModelRoute,
   reason: string,
   sortStrategy: string,
   context: Context,
@@ -3436,11 +3565,13 @@ async function relayAutoAttempt(
   attemptedRoutes: string[],
   attemptedChannels: string[]
 ): Promise<boolean> {
+  const channel = route.channel;
+  const targetModel = route.model;
   const canonicalKey = `${modelConfig.id}@${channel}`;
   const upstreamKey = `${targetModel.id}@${channel}`;
   const displayKey = upstreamKey === canonicalKey ? canonicalKey : `${canonicalKey} -> ${upstreamKey}`;
   attemptedRoutes.push(displayKey);
-  attemptedChannels.push(displayKey);
+  attemptedChannels.push(route.routeLabel);
   updateRouteSnapshot(routerModelId, modelConfig.id, targetModel, "trying");
   updateFooterStatus(routerModelId, channel, targetModel.id, "trying", [...attemptedChannels], undefined, targetModel.api);
 
@@ -3460,9 +3591,9 @@ async function relayAutoAttempt(
       return true;
     }
 
-    recordFailure(modelConfig.id, channel, error, config, modelConfig);
-    updateHealthStatus(modelConfig.id, channel, false);
-    recordCircuitOutcome(modelConfig.id, channel, false);
+    recordFailure(modelConfig.id, route.routeKey, error, config, modelConfig);
+    updateHealthStatus(modelConfig.id, route.routeKey, false);
+    recordCircuitOutcome(modelConfig.id, route.routeKey, false);
     updateFooterStatus(routerModelId, channel, targetModel.id, "failed", [...attemptedChannels], error, targetModel.api);
     return false;
   }
@@ -3485,11 +3616,11 @@ async function relayAutoAttempt(
     config,
     () => {
       const latency = Date.now() - streamStartTime;
-      recordLatency(modelConfig.id, channel, latency);
-      updateHealthStatus(modelConfig.id, channel, true);
-      recordCircuitOutcome(modelConfig.id, channel, true);
-      routerState.activeChannels.set(routerModelId, channel);
-      updateStickyRecord(routerModelId, modelConfig.id, channel, config);
+      recordLatency(modelConfig.id, route.routeKey, latency);
+      updateHealthStatus(modelConfig.id, route.routeKey, true);
+      recordCircuitOutcome(modelConfig.id, route.routeKey, true);
+      routerState.activeChannels.set(routerModelId, route.routeKey);
+      updateStickyRecord(routerModelId, modelConfig.id, channel, config, route.routeKey, route.upstreamId);
       updateRouteSnapshot(routerModelId, modelConfig.id, targetModel, "success");
       updateFooterStatus(routerModelId, channel, targetModel.id, "success", [...attemptedChannels], undefined, targetModel.api);
     }
@@ -3519,9 +3650,9 @@ async function relayAutoAttempt(
     return true;
   }
 
-  recordFailure(modelConfig.id, channel, error, config, modelConfig);
-  updateHealthStatus(modelConfig.id, channel, false);
-  recordCircuitOutcome(modelConfig.id, channel, false);
+  recordFailure(modelConfig.id, route.routeKey, error, config, modelConfig);
+  updateHealthStatus(modelConfig.id, route.routeKey, false);
+  recordCircuitOutcome(modelConfig.id, route.routeKey, false);
   updateFooterStatus(routerModelId, channel, targetModel.id, "failed", [...attemptedChannels], error, targetModel.api);
   return false;
 }
@@ -3545,18 +3676,18 @@ function routeAutoChannelFirst(
     try {
       // Try sticky route first if available
       if (stickyRecord) {
-        const stickyKey = `${stickyRecord.modelId}@${stickyRecord.channel}`;
+        const stickyKey = `${stickyRecord.modelId}@${stickyRecord.routeKey || stickyRecord.channel}`;
         const stickyModelConfig = configuredModels.find(m => m.id === stickyRecord.modelId);
-        const stickyRoute = stickyModelConfig ? resolveConfiguredRoute(stickyModelConfig, stickyRecord.channel, modelMap) : undefined;
-        const stickyModel = stickyRoute?.model;
+        const stickyRoute = stickyModelConfig
+          ? resolveConfiguredRouteByKey(stickyModelConfig, stickyRecord.routeKey || stickyRecord.channel, modelMap)
+          : undefined;
         
-        if (stickyModel && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
+        if (stickyRoute && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRoute.channel, stickyRoute.routeKey)) {
           debugLog(`[pi-router] Auto mode: trying sticky ${stickyKey}`);
           const ok = await relayAutoAttempt(
             "auto",
             stickyModelConfig,
-            stickyRecord.channel,
-            stickyModel,
+            stickyRoute,
             "sticky route",
             config.sortBy || "manual",
             context,
@@ -3579,19 +3710,18 @@ function routeAutoChannelFirst(
       for (const modelConfig of configuredModels) {
         debugLog(`[pi-router] Auto mode trying model: ${modelConfig.id}`);
         
-        const channelOrder = determineChannelOrder(modelConfig.id, modelConfig, config);
+        const routeOrder = determineRouteOrder(modelConfig.id, modelConfig, config);
         
-        for (const channel of channelOrder) {
-          const key = `${modelConfig.id}@${channel}`;
-          const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
-          const targetModel = route?.model;
+        for (const routeEntry of routeOrder) {
+          const key = `${modelConfig.id}@${routeEntry.routeKey}`;
+          const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
 
-          if (!targetModel) {
+          if (!route) {
             debugLog(`[pi-router] Auto mode: ${key} not found in modelMap`);
             continue;
           }
 
-          if (!canTryAutoChannel(modelConfig.id, channel)) {
+          if (!canTryAutoChannel(modelConfig.id, route.channel, route.routeKey)) {
             debugLog(`[pi-router] Auto mode: ${key} skipped (cooldown or circuit breaker)`);
             continue;
           }
@@ -3600,8 +3730,7 @@ function routeAutoChannelFirst(
           const ok = await relayAutoAttempt(
             "auto",
             modelConfig,
-            channel,
-            targetModel,
+            route,
             "auto mode (channelFirst)",
             config.sortBy || "manual",
             context,
@@ -3639,6 +3768,20 @@ function routeAutoChannelFirst(
 /**
  * Auto mode with custom strategy - uses customOrder array
  */
+function getCustomRouteOrder(config: RouterConfig): RouterCustomRouteConfig[] {
+  if (Array.isArray(config.customRoutes) && config.customRoutes.length > 0) {
+    return config.customRoutes.filter(route => !!route?.model && !!route?.channel);
+  }
+
+  return (config.customOrder || []).flatMap((item) => {
+    if (!item || typeof item !== "string" || !item.includes("@")) return [];
+    const parts = item.split("@");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) return [];
+    const [channel, upstreamModel] = parts[1].split("#");
+    return [{ model: parts[0], channel, ...(upstreamModel ? { upstreamModel } : {}) }];
+  });
+}
+
 function routeAutoCustom(
   context: Context,
   options: SimpleStreamOptions | undefined,
@@ -3652,9 +3795,9 @@ function routeAutoCustom(
 
   (async () => {
     try {
-      // Validate customOrder exists
-      if (!config.customOrder || config.customOrder.length === 0) {
-        const errorMsg = "[pi-router] Custom strategy requires customOrder array";
+      const customRoutes = getCustomRouteOrder(config);
+      if (customRoutes.length === 0) {
+        const errorMsg = "[pi-router] Custom strategy requires customOrder or customRoutes array";
         debugLog(errorMsg);
         eventStream.push(createRouterErrorEvent("auto", "router", ROUTER_API, errorMsg));
         eventStream.end();
@@ -3663,18 +3806,18 @@ function routeAutoCustom(
 
       // Try sticky route first if available
       if (stickyRecord) {
-        const stickyKey = `${stickyRecord.modelId}@${stickyRecord.channel}`;
+        const stickyKey = `${stickyRecord.modelId}@${stickyRecord.routeKey || stickyRecord.channel}`;
         const stickyModelConfig = config.models?.find(m => m.id === stickyRecord.modelId);
-        const stickyRoute = stickyModelConfig ? resolveConfiguredRoute(stickyModelConfig, stickyRecord.channel, modelMap) : undefined;
-        const stickyModel = stickyRoute?.model;
+        const stickyRoute = stickyModelConfig
+          ? resolveConfiguredRouteByKey(stickyModelConfig, stickyRecord.routeKey || stickyRecord.channel, modelMap)
+          : undefined;
 
-        if (stickyModel && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRecord.channel)) {
+        if (stickyRoute && stickyModelConfig && canTryAutoChannel(stickyRecord.modelId, stickyRoute.channel, stickyRoute.routeKey)) {
           debugLog(`[pi-router] Auto mode: trying sticky ${stickyKey}`);
           const ok = await relayAutoAttempt(
             "auto",
             stickyModelConfig,
-            stickyRecord.channel,
-            stickyModel,
+            stickyRoute,
             "sticky route",
             "custom",
             context,
@@ -3693,26 +3836,29 @@ function routeAutoCustom(
         }
       }
 
-      // Try channels in customOrder
-      for (const item of config.customOrder) {
-        const [modelId, channel] = item.split("@");
-
-        if (!modelId || !channel) {
-          debugLog(`[pi-router] Invalid customOrder item: ${item}`);
-          continue;
-        }
-
-        const key = `${modelId}@${channel}`;
+      // Try routes in custom order
+      for (const customRoute of customRoutes) {
+        const modelId = customRoute.model;
+        const channel = customRoute.channel;
+        const key = customRoute.upstreamModel ? `${modelId}@${channel}#${customRoute.upstreamModel}` : `${modelId}@${channel}`;
         const modelConfig = config.models?.find(m => m.id === modelId) || { id: modelId, channels: [channel] };
-        const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
-        const targetModel = route?.model;
+        const routeEntry: RouterRouteEntry = {
+          modelId,
+          channel,
+          upstreamModelId: customRoute.upstreamModel || modelConfig.modelByChannel?.[channel] || modelId,
+          routeKey: makeRouteKey(channel, customRoute.upstreamModel || modelConfig.modelByChannel?.[channel], modelId),
+          label: channel,
+          explicitModel: !!customRoute.upstreamModel || !!modelConfig.modelByChannel?.[channel],
+        };
+        routeEntry.label = getRouteDisplayLabel(routeEntry);
+        const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
 
-        if (!targetModel) {
+        if (!route) {
           debugLog(`[pi-router] Auto mode: ${key} not found in modelMap`);
           continue;
         }
 
-        if (!canTryAutoChannel(modelId, channel)) {
+        if (!canTryAutoChannel(modelId, route.channel, route.routeKey)) {
           debugLog(`[pi-router] Auto mode: ${key} skipped (cooldown or circuit breaker)`);
           continue;
         }
@@ -3721,8 +3867,7 @@ function routeAutoCustom(
         const ok = await relayAutoAttempt(
           "auto",
           modelConfig,
-          channel,
-          targetModel,
+          route,
           "auto mode (custom order)",
           "custom",
           context,
@@ -3803,47 +3948,91 @@ function routeRequest(
 /**
  * Determine channel order based on strategy and config
  */
+function determineRouteOrder(
+  modelId: string,
+  modelConfig: RouterModelConfig,
+  config: RouterConfig
+): RouterRouteEntry[] {
+  const routes = [...getModelRouteEntries(modelConfig)];
+
+  // If sticky mode and we have an active route, try it first. activeChannels
+  // stores a routeKey for new configs and a channel name for legacy configs.
+  if (modelConfig.sticky !== false && config.sticky !== false) {
+    const activeRouteKey = routerState.activeChannels.get(modelId);
+    const activeRoute = routes.find(route => route.routeKey === activeRouteKey || route.channel === activeRouteKey);
+    if (activeRoute) {
+      const activeSignature = getRouteSignature(activeRoute);
+      return [activeRoute, ...routes.filter(route => getRouteSignature(route) !== activeSignature)];
+    }
+  }
+
+  const sortBy = modelConfig.sortBy || config.sortBy || "config";
+  if (sortBy === "latency") {
+    return sortRoutesByLatency(modelId, routes);
+  }
+  if (sortBy === "cost" || sortBy === "costFirst") {
+    return sortRoutesByCost(modelId, routes);
+  }
+  if (sortBy === "capabilityFirst") {
+    return routes;
+  }
+  return routes;
+}
+
+function routeEntriesFromOrder(modelConfig: RouterModelConfig, order: string[]): RouterRouteEntry[] {
+  const configuredRoutes = getModelRouteEntries(modelConfig);
+  const consumed = new Set<string>();
+  const result: RouterRouteEntry[] = [];
+
+  const takeRoute = (key: string): RouterRouteEntry | undefined => {
+    const exact = configuredRoutes.find(route => !consumed.has(getRouteSignature(route)) && route.routeKey === key);
+    if (exact) return exact;
+    return configuredRoutes.find(route => !consumed.has(getRouteSignature(route)) && route.channel === key);
+  };
+
+  for (const key of order) {
+    const route = takeRoute(key);
+    if (route) {
+      consumed.add(getRouteSignature(route));
+      result.push(route);
+      continue;
+    }
+
+    const fallback: RouterRouteEntry = {
+      modelId: modelConfig.id,
+      channel: key,
+      upstreamModelId: modelConfig.modelByChannel?.[key] || modelConfig.id,
+      routeKey: makeRouteKey(key, modelConfig.modelByChannel?.[key], modelConfig.id),
+      label: key,
+      explicitModel: !!modelConfig.modelByChannel?.[key],
+    };
+    fallback.label = getRouteDisplayLabel(fallback);
+    result.push(fallback);
+  }
+
+  return result;
+}
+
 function determineChannelOrder(
   modelId: string,
   modelConfig: RouterModelConfig,
   config: RouterConfig
 ): string[] {
-  const channels = [...modelConfig.channels];
-  
-  // If sticky mode and we have an active channel, try it first
-  if (modelConfig.sticky !== false && config.sticky !== false) {
-    const activeChannel = routerState.activeChannels.get(modelId);
-    if (activeChannel && channels.includes(activeChannel)) {
-      // Move active channel to front
-      const filtered = channels.filter(c => c !== activeChannel);
-      return [activeChannel, ...filtered];
-    }
-  }
-  
-  // Determine sort strategy
-  const sortBy = modelConfig.sortBy || config.sortBy || "config";
-  
-  if (sortBy === "config") {
-    // Use config order as-is
-    return channels;
-  }
-  
-  if (sortBy === "latency") {
-    // Sort by latency (lower is better)
-    return sortChannelsByLatency(modelId, channels);
-  }
-  
-  if (sortBy === "cost" || sortBy === "costFirst") {
-    // Sort by cost (lower is better)
-    return sortChannelsByCost(modelId, channels);
-  }
-  
-  if (sortBy === "capabilityFirst") {
-    // Sort by capability score (higher is better)
-    return sortChannelsByCapability(modelId, channels);
-  }
-  
-  return channels;
+  return determineRouteOrder(modelId, modelConfig, config).map(route => route.routeKey);
+}
+
+function sortRoutesByCost(modelId: string, routes: RouterRouteEntry[]): RouterRouteEntry[] {
+  return [...routes].sort((a, b) => {
+    const aPricing = getChannelPricing(modelId, a.channel);
+    const bPricing = getChannelPricing(modelId, b.channel);
+    const aCost = aPricing ? estimateRequestCost(modelId, a.channel, 1000, 500, 0, 0) : Infinity;
+    const bCost = bPricing ? estimateRequestCost(modelId, b.channel, 1000, 500, 0, 0) : Infinity;
+    return aCost - bCost;
+  });
+}
+
+function sortRoutesByLatency(modelId: string, routes: RouterRouteEntry[]): RouterRouteEntry[] {
+  return [...routes].sort((a, b) => (getAverageLatency(modelId, a.routeKey) ?? Infinity) - (getAverageLatency(modelId, b.routeKey) ?? Infinity));
 }
 
 /**
@@ -4283,38 +4472,39 @@ function createFailoverStream(
   let attemptedChannels: string[] = [];
   const sortStrategy = modelConfig.sortBy || config.sortBy || "config";
   const eventStream = createAssistantMessageEventStream();
+  const routeOrder = routeEntriesFromOrder(modelConfig, channelOrder);
   
-  const tryNextChannel = (): { channel: string; targetModel: PiModel; routeDisplay: string; stream: AssistantMessageEventStream } | null => {
-    while (currentChannelIndex < channelOrder.length) {
-      const channel = channelOrder[currentChannelIndex];
+  const tryNextChannel = (): { channel: string; route: ResolvedModelRoute; targetModel: PiModel; routeDisplay: string; stream: AssistantMessageEventStream } | null => {
+    while (currentChannelIndex < routeOrder.length) {
+      const routeEntry = routeOrder[currentChannelIndex];
       currentChannelIndex++;
-      
-      const key = `${modelId}@${channel}`;
+      const channel = routeEntry.channel;
+      const key = getRouteStateKey(modelId, routeEntry.routeKey);
       
       // Check cooldown
       const cooldownEnd = routerState.cooldowns.get(key);
       if (cooldownEnd && Date.now() < cooldownEnd) {
         const remainingMs = cooldownEnd - Date.now();
-        debugLog(`[pi-router] Channel ${channel} in cooldown (${Math.ceil(remainingMs / 1000)}s remaining)`);
+        debugLog(`[pi-router] Route ${routeEntry.label} in cooldown (${Math.ceil(remainingMs / 1000)}s remaining)`);
         continue;
       }
       
       // Check circuit breaker
-      if (!canAttemptChannel(modelId, channel)) {
-        debugLog(`[pi-router] Circuit breaker open for ${channel}, skipping`);
+      if (!canAttemptChannel(modelId, routeEntry.routeKey)) {
+        debugLog(`[pi-router] Circuit breaker open for ${routeEntry.label}, skipping`);
         continue;
       }
       
-      const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
+      const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
       const targetModel = route?.model;
-      if (!targetModel) {
+      if (!route || !targetModel) {
         debugLog(`[pi-router] Model not found: ${key}`);
         continue;
       }
-      const routeDisplay = targetModel.id === modelId ? channel : `${channel} -> ${targetModel.id}`;
+      const routeDisplay = targetModel.id === modelId ? route.routeLabel : `${channel} -> ${targetModel.id}`;
       
       debugLog(`[pi-router] Attempting ${routeDisplay}...`);
-      attemptedChannels.push(routeDisplay);
+      attemptedChannels.push(route.routeLabel);
       updateRouteSnapshot(modelId, modelConfig.id, targetModel, "trying");
       updateFooterStatus(modelId, channel, targetModel.id, "trying", [...attemptedChannels], undefined, targetModel.api);
 
@@ -4332,14 +4522,14 @@ function createFailoverStream(
           reason: attemptedChannels.length === 1 ? "first choice" : `failover after ${attemptedChannels.length - 1} failures`,
         });
 
-        return { channel, targetModel, routeDisplay, stream };
+        return { channel, route, targetModel, routeDisplay, stream };
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
         debugLog(`[pi-router] Failed to start stream on ${routeDisplay}:`, err);
         updateRouteSnapshot(modelId, modelConfig.id, targetModel, "failed");
-        recordFailure(modelId, channel, error, config, modelConfig);
-        updateHealthStatus(modelId, channel, false);
-        recordCircuitOutcome(modelId, channel, false);
+        recordFailure(modelId, route.routeKey, error, config, modelConfig);
+        updateHealthStatus(modelId, route.routeKey, false);
+        recordCircuitOutcome(modelId, route.routeKey, false);
         updateFooterStatus(modelId, channel, targetModel.id, "failed", [...attemptedChannels], error, targetModel.api);
       }
     }
@@ -4348,11 +4538,12 @@ function createFailoverStream(
   };
   
   const relayAttempt = async (
-    channel: string,
-    targetModel: PiModel,
+    route: ResolvedModelRoute,
     routeDisplay: string,
     stream: AssistantMessageEventStream
   ): Promise<RelayProviderStreamResult> => {
+    const channel = route.channel;
+    const targetModel = route.model;
     const streamStartTime = Date.now();
     return relayProviderStream(
       stream,
@@ -4361,10 +4552,10 @@ function createFailoverStream(
       config,
       () => {
         const latency = Date.now() - streamStartTime;
-        recordLatency(modelId, channel, latency);
-        updateHealthStatus(modelId, channel, true);
-        recordCircuitOutcome(modelId, channel, true);
-        routerState.activeChannels.set(modelId, channel);
+        recordLatency(modelId, route.routeKey, latency);
+        updateHealthStatus(modelId, route.routeKey, true);
+        recordCircuitOutcome(modelId, route.routeKey, true);
+        routerState.activeChannels.set(modelId, route.routeKey);
         updateRouteSnapshot(modelId, modelConfig.id, targetModel, "success");
         updateFooterStatus(modelId, channel, targetModel.id, "success", [...attemptedChannels], undefined, targetModel.api);
   
@@ -4393,7 +4584,7 @@ function createFailoverStream(
         return;
       }
       
-      const relayResult = await relayAttempt(attempt.channel, attempt.targetModel, attempt.routeDisplay, attempt.stream);
+      const relayResult = await relayAttempt(attempt.route, attempt.routeDisplay, attempt.stream);
       if (relayResult.ok) {
         eventStream.end();
         return;
@@ -4417,9 +4608,9 @@ function createFailoverStream(
         return;
       }
 
-      recordFailure(modelId, attempt.channel, error, config, modelConfig);
-      updateHealthStatus(modelId, attempt.channel, false);
-      recordCircuitOutcome(modelId, attempt.channel, false);
+      recordFailure(modelId, attempt.route.routeKey, error, config, modelConfig);
+      updateHealthStatus(modelId, attempt.route.routeKey, false);
+      recordCircuitOutcome(modelId, attempt.route.routeKey, false);
       updateFooterStatus(modelId, attempt.channel, attempt.targetModel.id, "failed", [...attemptedChannels], error, attempt.targetModel.api);
     }
   })().catch((err) => {
@@ -5194,21 +5385,22 @@ function startHealthProbes(config: RouterConfig): void {
   
   debugLog(`[pi-router] Starting health probes (interval: ${healthProber.intervalMs}ms)`);
   
-  // Probe all configured channels
+  // Probe all configured routes. Route keys distinguish same-provider variants.
   for (const modelConfig of config.models) {
-    for (const channel of modelConfig.channels) {
-      const key = `${modelConfig.id}@${channel}`;
-      scheduleProbe(key, modelConfig, config);
+    for (const routeEntry of getModelRouteEntries(modelConfig)) {
+      const key = getRouteStateKey(modelConfig.id, routeEntry.routeKey);
+      scheduleProbe(key, modelConfig, routeEntry, config);
     }
   }
 }
 
 /**
- * Schedule periodic probe for a channel
+ * Schedule periodic probe for a channel/route
  */
 function scheduleProbe(
   key: string,
   modelConfig: RouterModelConfig,
+  routeEntry: RouterRouteEntry,
   config: RouterConfig
 ): void {
   // Clear existing timer if any
@@ -5219,7 +5411,7 @@ function scheduleProbe(
 
   // Schedule periodic probe
   const timer = setInterval(() => {
-    probeChannel(key, modelConfig, config);
+    probeChannel(key, modelConfig, routeEntry, config);
   }, healthProber.intervalMs);
 
   healthProber.timers.set(key, timer);
@@ -5227,22 +5419,24 @@ function scheduleProbe(
   // Delay initial probe by 30 seconds to avoid startup noise
   // This gives pi time to fully initialize before probing
   setTimeout(() => {
-    probeChannel(key, modelConfig, config);
+    probeChannel(key, modelConfig, routeEntry, config);
   }, 30000);
 }
 
 /**
- * Probe a single channel
+ * Probe a single channel/route
  */
 async function probeChannel(
   key: string,
   modelConfig: RouterModelConfig,
+  routeEntry: RouterRouteEntry,
   config: RouterConfig
 ): Promise<void> {
-  const [modelId, channel] = key.split("@");
+  const modelId = modelConfig.id;
+  const channel = routeEntry.channel;
   
   // Skip if circuit breaker is open
-  if (!canAttemptChannel(modelId, channel)) {
+  if (!canAttemptChannel(modelId, routeEntry.routeKey)) {
     debugLog(`[pi-router] Skipping probe for ${key} (circuit breaker open)`);
     return;
   }
@@ -5255,10 +5449,10 @@ async function probeChannel(
     // FIX #15: Use cached modelMap instead of rebuilding
     const modelMap = getCachedModelMap(routerState.currentModelRegistry);
 
-    const route = resolveConfiguredRoute(modelConfig, channel, modelMap);
+    const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
     const targetModel = route?.model;
 
-    if (!targetModel) {
+    if (!route || !targetModel) {
       throw new Error(`Model not found: ${key}`);
     }
     
@@ -5299,15 +5493,15 @@ async function probeChannel(
     
     // Record success
     healthProber.lastProbe.set(key, {
-      channel,
+      channel: route.routeLabel,
       success: true,
       latencyMs,
       timestamp: Date.now(),
     });
     
     // Update health status and circuit breaker
-    updateHealthStatus(modelId, channel, true);
-    recordCircuitOutcome(modelId, channel, true);
+    updateHealthStatus(modelId, route.routeKey, true);
+    recordCircuitOutcome(modelId, route.routeKey, true);
     
     debugLog(`[pi-router] Probe ${key} succeeded (${latencyMs}ms)`);
     
@@ -5320,7 +5514,7 @@ async function probeChannel(
     // starts, or need longer than the probe timeout. Real user traffic is the
     // source of truth for failover health.
     healthProber.lastProbe.set(key, {
-      channel,
+      channel: routeEntry.label,
       success: false,
       error: String(err),
       timestamp: Date.now(),

@@ -381,6 +381,21 @@ Alias fields let one router-facing canonical model group provider-specific upstr
 - `modelByChannel[channel]` is the exact upstream model ID to send to that provider when it differs from `id`
 - if no `modelByChannel` entry exists, pi-router tries `id` and then aliases for that channel
 
+If the same provider exposes both the canonical upstream ID and a variant ID, use `routes` so both entries can be sorted independently:
+
+```json
+{
+  "id": "example-model",
+  "aliases": ["proxy/example-model"],
+  "routes": [
+    { "channel": "Provider-B" },
+    { "channel": "Provider-B", "model": "proxy/example-model" }
+  ]
+}
+```
+
+The config/order UI displays the second entry as `Provider-B (proxy/example-model)` but saves the structured route, not the display label. Custom strategy also supports `customRoutes` for these duplicate-provider route entries.
+
 pi-router also exposes active routes through the optional `Symbol.for("pi.routing.registry.v1")` protocol and reads optional cache hints from `Symbol.for("pi.cache.hints.v1")`. This keeps integrations with cache/status extensions protocol-based while preserving true upstream assistant message metadata for cache statistics.
 
 ### Manual Editing

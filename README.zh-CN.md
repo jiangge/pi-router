@@ -381,6 +381,21 @@ Footer 默认行为：
 - `modelByChannel[channel]` 指定该 provider 需要发送的精确上游模型 ID
 - 如果没有 `modelByChannel`，pi-router 会依次尝试 `id` 和 aliases 在该 channel 下的真实模型
 
+如果同一个 provider 同时提供 canonical 上游 ID 和变种 ID，可使用 `routes` 让两个条目在排序界面中独立出现：
+
+```json
+{
+  "id": "example-model",
+  "aliases": ["proxy/example-model"],
+  "routes": [
+    { "channel": "Provider-B" },
+    { "channel": "Provider-B", "model": "proxy/example-model" }
+  ]
+}
+```
+
+config/order UI 会把第二个条目显示为 `Provider-B (proxy/example-model)`，但保存的是结构化 route，不会把显示文本写入 channel。custom 策略也支持 `customRoutes` 来区分这些同 provider 的 route 条目。
+
 pi-router 也会通过可选的 `Symbol.for("pi.routing.registry.v1")` 协议暴露当前真实路由，并从 `Symbol.for("pi.cache.hints.v1")` 读取可选缓存提示。这样可以用协议方式集成缓存/状态类扩展，同时保留上游 assistant message 的真实 metadata 供缓存统计使用。
 
 ### 手动编辑

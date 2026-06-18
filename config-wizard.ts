@@ -351,6 +351,12 @@ interface ChannelScore {
   score: number;
   reason: string;
   category: string;
+  /** Exact upstream model id when this channel entry targets a model-name variant. */
+  upstreamModel?: string;
+  /** Stable route key; differs from channel when the same provider appears more than once. */
+  routeKey?: string;
+  /** Display-only label, e.g. `wx-api (oc/deepseek-v4-flash-free)`. */
+  label?: string;
 }
 
 /**

@@ -12,6 +12,9 @@ export class FlatOrderEditor implements Component {
   private items: Array<{
     model: string;
     channel: string;
+    routeKey: string;
+    upstreamModel?: string;
+    label: string;
     reason: string;
     category: string;
   }>;
@@ -63,16 +66,19 @@ export class FlatOrderEditor implements Component {
         const model = models.find(m => m.id === modelId);
         if (!model) continue;
 
-        const channel = model.channels.find(ch => ch.channel === channelName);
+        const channel = model.channels.find(ch => (ch.routeKey || ch.channel) === channelName || ch.channel === channelName);
         if (!channel) continue;
 
-        const key = `${modelId}@${channelName}`;
+        const key = `${modelId}@${channel.routeKey || channel.channel}`;
         if (seen.has(key)) continue;
         seen.add(key);
 
         this.items.push({
           model: modelId,
-          channel: channelName,
+          channel: channel.channel,
+          routeKey: channel.routeKey || channel.channel,
+          upstreamModel: channel.upstreamModel,
+          label: channel.label || (channel.upstreamModel && channel.upstreamModel !== modelId ? `${channel.channel} (${channel.upstreamModel})` : channel.channel),
           reason: channel.reason,
           category: channel.category,
         });
@@ -88,13 +94,16 @@ export class FlatOrderEditor implements Component {
         if (i >= model.channels.length) continue;
 
         const ch = model.channels[i];
-        const key = `${model.id}@${ch.channel}`;
+        const key = `${model.id}@${ch.routeKey || ch.channel}`;
         if (seen.has(key)) continue;
         seen.add(key);
 
         this.items.push({
           model: model.id,
           channel: ch.channel,
+          routeKey: ch.routeKey || ch.channel,
+          upstreamModel: ch.upstreamModel,
+          label: ch.label || (ch.upstreamModel && ch.upstreamModel !== model.id ? `${ch.channel} (${ch.upstreamModel})` : ch.channel),
           reason: ch.reason,
           category: ch.category,
         });
@@ -216,7 +225,7 @@ export class FlatOrderEditor implements Component {
       }
 
       const num = `${idx + 1}.`.padEnd(4);
-      const pair = `${item.model}@${item.channel}`.padEnd(35);
+      const pair = `${item.model}@${item.label}`.padEnd(35);
       const reason = item.reason.length > 18 ? item.reason.substring(0, 15) + "..." : item.reason.padEnd(18);
       const cat = `[${item.category}]`;
 
@@ -318,6 +327,6 @@ export class FlatOrderEditor implements Component {
   }
 
   getResult(): string[] {
-    return this.items.map(item => `${item.model}@${item.channel}`);
+    return this.items.map(item => `${item.model}@${item.routeKey}`);
   }
 }

@@ -13,6 +13,7 @@
     "config-wizard-flow.ts",
     "config-wizard-two-tier.ts",
     "config-wizard-flat.ts",
+    "router-routes.ts",
     "examples",
     "README.md",
     "README.zh-CN.md",

@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Canonical router model aliases**: `pi-router.json` models now support `aliases` and `modelByChannel`, allowing one router-facing model ID to group provider-specific upstream model names without editing `models.json`.
-- **Alias-aware routing**: failover, auto mode, custom order, fallback models, mirror model registration, health probes, and `/router sync` now resolve the real upstream model ID before calling providers.
+- **Canonical router model aliases**: `pi-router.json` models now support `aliases`, `modelByChannel`, and optional `routes`, allowing one router-facing model ID to group provider-specific upstream model names without editing `models.json`.
+- **Alias-aware routing**: failover, auto mode, custom/customRoutes order, fallback models, mirror model registration, health probes, and `/router sync` now resolve the real upstream model ID before calling providers.
+- **Same-provider variant routes**: config/order UI can sort duplicate provider routes independently and labels variants as `channel (upstreamModel)` without writing labels into config.
 - **Generic routing-provider protocol**: pi-router registers `Symbol.for("pi.routing.registry.v1")` snapshots for active/candidate routes and consumes `Symbol.for("pi.cache.hints.v1")` cache hints for optimized system prompts, prompt cache keys, and cache retention.
 
 ### Fixed
@@ -20,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- Expanded router regression coverage to 70 passing tests, including canonical DeepSeek alias routing and protocol/cache-hint forwarding.
+- Expanded router regression coverage to 77 passing tests, including canonical DeepSeek alias routing, duplicate same-provider variant routes, config/order preservation, and protocol/cache-hint forwarding.
 
 ## [0.3.2] - 2026-06-14
 

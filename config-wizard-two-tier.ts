@@ -6,6 +6,7 @@
 
 import { matchesKey, Key, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import type { ChannelScore } from "./config-wizard.js";
+import { serializeRouteEntriesForConfig } from "./router-routes.js";
 
 type EditMode = "model" | "channel";
 type EditState = "browsing" | "moving";
@@ -15,6 +16,9 @@ export class TwoTierOrderEditor implements Component {
     id: string;
     channels: Array<{
       name: string;
+      label: string;
+      routeKey: string;
+      upstreamModel?: string;
       reason: string;
       category: string;
       fixed: boolean;
@@ -55,6 +59,9 @@ export class TwoTierOrderEditor implements Component {
       id: m.id,
       channels: m.channels.map(ch => ({
         name: ch.channel,
+        label: ch.label || (ch.upstreamModel && ch.upstreamModel !== m.id ? `${ch.channel} (${ch.upstreamModel})` : ch.channel),
+        routeKey: ch.routeKey || ch.channel,
+        upstreamModel: ch.upstreamModel,
         reason: ch.reason,
         category: ch.category,
         fixed: false
@@ -373,7 +380,7 @@ export class TwoTierOrderEditor implements Component {
       }
 
       const num = `${chIdx + 1}.`.padEnd(4);
-      const name = ch.name.padEnd(18);
+      const name = ch.label.padEnd(18);
       const reason = ch.reason.length > 20 ? ch.reason.substring(0, 17) + "..." : ch.reason.padEnd(20);
       const cat = `[${ch.category}]`;
 
@@ -554,10 +561,18 @@ export class TwoTierOrderEditor implements Component {
     this.currentChannelIndex = originalIndex;
   }
 
-  getResult(): Array<{ id: string; channels: string[] }> {
-    return this.models.map(m => ({
-      id: m.id,
-      channels: m.channels.map(ch => ch.name)
-    }));
+  getResult(): Array<{ id: string; channels: string[]; modelByChannel?: Record<string, string>; routes?: Array<{ channel: string; model?: string }> }> {
+    return this.models.map(m => {
+      const serialized = serializeRouteEntriesForConfig(
+        m.id,
+        m.channels.map(ch => ({ channel: ch.name, upstreamModelId: ch.upstreamModel || m.id }))
+      );
+      return {
+        id: m.id,
+        channels: serialized.channels,
+        ...(serialized.modelByChannel ? { modelByChannel: serialized.modelByChannel } : {}),
+        ...(serialized.routes ? { routes: serialized.routes } : {}),
+      };
+    });
   }
 }

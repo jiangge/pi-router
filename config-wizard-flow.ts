@@ -7,6 +7,13 @@ import { createStepComponent, ChannelOrderEditor } from "./config-wizard-ui.js";
 import { TwoTierOrderEditor } from "./config-wizard-two-tier.js";
 import { FlatOrderEditor } from "./config-wizard-flat.js";
 import {
+  getModelRouteEntries,
+  makeRouteKey,
+  serializeRouteEntriesForConfig,
+  type RouterCustomRouteConfig,
+  type RouterRouteConfig,
+} from "./router-routes.js";
+import {
   scanAndClassifyChannels,
   smartSortChannels,
   type WizardConfig,
@@ -28,8 +35,13 @@ type RouterConfig = {
   models?: Array<{
     id: string;
     channels: string[];
+    aliases?: string[];
+    modelByChannel?: Record<string, string>;
+    routes?: RouterRouteConfig[];
+    [key: string]: unknown;
   }>;
   customOrder?: string[];  // For custom strategy
+  customRoutes?: RouterCustomRouteConfig[];
   failover?: {
     on?: string[];
     cooldownMs?: number;
@@ -45,15 +57,66 @@ type EditableWizardModel = {
 
 function toEditableChannelScore(
   channel: string,
-  classifications: Map<string, { category: "oauth" | "free" | "aggregator"; reason: string }>
+  classifications: Map<string, { category: "oauth" | "free" | "aggregator"; reason: string }>,
+  upstreamModel?: string,
+  canonicalModelId?: string,
+  routeKey?: string
 ): ChannelScore {
   const classification = classifications.get(channel);
+  const label = upstreamModel && canonicalModelId && upstreamModel !== canonicalModelId
+    ? `${channel} (${upstreamModel})`
+    : channel;
   return {
     channel,
     score: 50,
     reason: classification?.reason || "Configured channel (currently unavailable)",
     category: classification?.category || "aggregator",
+    upstreamModel,
+    routeKey,
+    label,
   };
+}
+
+function editableModelToConfigModel(model: EditableWizardModel): RouterConfig["models"] extends Array<infer T> ? T : never {
+  const serialized = serializeRouteEntriesForConfig(
+    model.id,
+    model.channels.map(channel => ({
+      channel: channel.channel,
+      upstreamModelId: channel.upstreamModel || model.id,
+    }))
+  );
+
+  return {
+    id: model.id,
+    channels: serialized.channels,
+    ...(serialized.modelByChannel ? { modelByChannel: serialized.modelByChannel } : {}),
+    ...(serialized.routes ? { routes: serialized.routes } : {}),
+  } as RouterConfig["models"] extends Array<infer T> ? T : never;
+}
+
+function orderStringsToCustomRoutes(order: string[], models: EditableWizardModel[]): RouterCustomRouteConfig[] {
+  const byModel = new Map(models.map(model => [model.id, model]));
+  return order.flatMap((item) => {
+    const [modelId, routeKey] = item.split("@");
+    if (!modelId || !routeKey) return [];
+    const model = byModel.get(modelId);
+    const channel = model?.channels.find(ch => (ch.routeKey || ch.channel) === routeKey || ch.channel === routeKey);
+    return [{
+      model: modelId,
+      channel: channel?.channel || routeKey,
+      ...(channel?.upstreamModel && channel.upstreamModel !== modelId ? { upstreamModel: channel.upstreamModel } : {}),
+    }];
+  });
+}
+
+function customRoutesToInitialOrder(routes: RouterCustomRouteConfig[] | undefined, fallbackOrder: string[] | undefined, models: EditableWizardModel[]): string[] | undefined {
+  if (!routes || routes.length === 0) return fallbackOrder;
+  const byModel = new Map(models.map(model => [model.id, model]));
+  return routes.map(route => {
+    const model = byModel.get(route.model);
+    const channel = model?.channels.find(ch => ch.channel === route.channel && (ch.upstreamModel || route.model) === (route.upstreamModel || route.model));
+    return `${route.model}@${channel?.routeKey || route.channel}`;
+  });
 }
 
 export function hasExistingRouterModelConfig(config: RouterConfig): boolean {
@@ -65,31 +128,57 @@ export function buildEditableModelsFromConfig(
   currentModels: Array<{ id: string; provider: string; baseUrl?: string }>
 ): EditableWizardModel[] {
   const classifications = scanAndClassifyChannels(currentModels);
-  const discoveredChannelsByModel = new Map<string, string[]>();
+  const aliasLookup = new Map<string, string>();
+  for (const configModel of config.models || []) {
+    aliasLookup.set(configModel.id.toLowerCase(), configModel.id);
+    for (const alias of configModel.aliases || []) aliasLookup.set(alias.toLowerCase(), configModel.id);
+    for (const alias of Object.values(configModel.modelByChannel || {})) aliasLookup.set(alias.toLowerCase(), configModel.id);
+    for (const route of configModel.routes || []) {
+      if (route.model) aliasLookup.set(route.model.toLowerCase(), configModel.id);
+    }
+  }
 
+  const discoveredRoutesByModel = new Map<string, Array<{ channel: string; upstreamModel: string }>>();
   for (const model of currentModels) {
-    const channels = discoveredChannelsByModel.get(model.id) || [];
-    if (!channels.includes(model.provider)) {
-      channels.push(model.provider);
-      discoveredChannelsByModel.set(model.id, channels);
+    const canonicalId = aliasLookup.get(model.id.toLowerCase()) || model.id;
+    const routes = discoveredRoutesByModel.get(canonicalId) || [];
+    const signature = `${model.provider}\u0000${model.id}`;
+    if (!routes.some(route => `${route.channel}\u0000${route.upstreamModel}` === signature)) {
+      routes.push({ channel: model.provider, upstreamModel: model.id });
+      discoveredRoutesByModel.set(canonicalId, routes);
     }
   }
 
   return (config.models || [])
     .map((configModel) => {
-      const discoveredChannels = discoveredChannelsByModel.get(configModel.id) || [];
+      const discoveredRoutes = discoveredRoutesByModel.get(configModel.id) || [];
 
       // Preserve the user's configured order even when a provider is temporarily
-      // unavailable from the current registry scan. Newly discovered channels are
-      // appended after the saved order.
-      const configuredChannels = configModel.channels.filter((channel) => channel !== "router" && channel !== "pi-router");
-      const configuredSet = new Set(configuredChannels);
-      const newlyDiscoveredChannels = discoveredChannels.filter((channel) => !configuredSet.has(channel));
+      // unavailable from the current registry scan. Newly discovered routes are
+      // appended after the saved order. A route is channel + upstream model so the
+      // same provider can appear twice for canonical and variant model names.
+      const configuredRoutes = getModelRouteEntries(configModel)
+        .filter((route) => route.channel !== "router" && route.channel !== "pi-router");
+      const configuredSet = new Set(configuredRoutes.map(route => `${route.channel}\u0000${route.upstreamModelId}`));
+      const newlyDiscoveredRoutes = discoveredRoutes
+        .filter((route) => !configuredSet.has(`${route.channel}\u0000${route.upstreamModel}`))
+        .map((route) => ({
+          modelId: configModel.id,
+          channel: route.channel,
+          upstreamModelId: route.upstreamModel,
+          routeKey: makeRouteKey(route.channel, route.upstreamModel, configModel.id),
+          label: route.upstreamModel !== configModel.id ? `${route.channel} (${route.upstreamModel})` : route.channel,
+          explicitModel: route.upstreamModel !== configModel.id,
+        }));
 
-      const mergedChannels = [...configuredChannels, ...newlyDiscoveredChannels];
-
-      // Map to editable channel scores
-      const editableChannels = mergedChannels.map((channel) => toEditableChannelScore(channel, classifications));
+      const mergedRoutes = [...configuredRoutes, ...newlyDiscoveredRoutes];
+      const editableChannels = mergedRoutes.map((route) => toEditableChannelScore(
+        route.channel,
+        classifications,
+        route.upstreamModelId !== configModel.id ? route.upstreamModelId : undefined,
+        configModel.id,
+        route.routeKey,
+      ));
 
       return {
         id: configModel.id,
@@ -199,15 +288,13 @@ export async function runConfigWizard(
     };
 
     if (wizardConfig.strategy === "custom") {
-      // Custom strategy: use customOrder array
-      finalConfig.models = multiChannelModels.map(m => ({
-        id: m.id,
-        channels: m.channels.map(ch => ch.channel)
-      }));
-      finalConfig.customOrder = orderResult as string[];
+      const orderStrings = orderResult as string[];
+      finalConfig.models = multiChannelModels.map(editableModelToConfigModel);
+      finalConfig.customOrder = orderStrings;
+      finalConfig.customRoutes = orderStringsToCustomRoutes(orderStrings, multiChannelModels);
     } else {
       // channelFirst strategy: use models array
-      finalConfig.models = orderResult as Array<{ id: string; channels: string[] }>;
+      finalConfig.models = orderResult as RouterConfig["models"];
     }
     
     // Save config
@@ -256,22 +343,28 @@ export async function runConfigOrderWizard(
     editableModels,
     sortBy,
     strategy,
-    config.customOrder,
+    customRoutesToInitialOrder(config.customRoutes, config.customOrder, editableModels),
   );
   if (!orderResult) return;
 
   const nextConfig: RouterConfig = {
     ...config,
-    models: editableModels.map((model) => ({
-      id: model.id,
-      channels: model.channels.map((channel) => channel.channel),
-    })),
+    models: editableModels.map((model) => {
+      const existing = config.models?.find(configModel => configModel.id === model.id) || { id: model.id, channels: [] };
+      return { ...existing, ...editableModelToConfigModel(model) };
+    }),
   };
 
   if (strategy === "custom") {
-    nextConfig.customOrder = orderResult as string[];
+    const orderStrings = orderResult as string[];
+    nextConfig.customOrder = orderStrings;
+    nextConfig.customRoutes = orderStringsToCustomRoutes(orderStrings, editableModels);
   } else {
-    nextConfig.models = orderResult as Array<{ id: string; channels: string[] }>;
+    const orderedModels = orderResult as NonNullable<RouterConfig["models"]>;
+    nextConfig.models = orderedModels.map((orderedModel) => {
+      const existing = config.models?.find(configModel => configModel.id === orderedModel.id) || { id: orderedModel.id, channels: [] };
+      return { ...existing, ...orderedModel };
+    });
   }
 
   saveConfig(nextConfig);
@@ -506,10 +599,7 @@ async function runStep6AdjustOrder(
 
         editor.onSkip = () => {
           // Skip adjustment, use smart sorted order
-          const result = models.map(m => ({
-            id: m.id,
-            channels: m.channels.map(ch => ch.channel)
-          }));
+          const result = models.map(m => editableModelToConfigModel(m));
           done(result);
         };
 
