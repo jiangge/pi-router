@@ -11,12 +11,14 @@ import {
   __testGetCachedModelMap,
   __testGetConfigurableModels,
   __testGetSyncModels,
+  __testGetHealthProbeTimerKeys,
   __testLoadConfig,
   __testLoadModelsJson,
   __testRefreshConfigFromDisk,
   __testResetInternalState,
   __testSaveConfig,
   __testSetPiConfigDir,
+  __testStartHealthProbes,
 } from '../index.js';
 
 describe('Performance Optimizations', () => {
@@ -274,12 +276,10 @@ describe('Performance Optimizations', () => {
     ]);
   });
 
-  it('sync models only include explicit models.json entries and ignore auth-only builtin claude models', () => {
+  it('sync models include auth-only builtin providers and ignore deprecated candidates', () => {
     fs.writeFileSync(
       path.join(testDir, 'auth.json'),
-      JSON.stringify({
-        anthropic: { type: 'oauth' },
-      }),
+      JSON.stringify({ 'openai-codex': { type: 'oauth' } }),
       'utf-8',
     );
     fs.writeFileSync(
@@ -295,6 +295,21 @@ describe('Performance Optimizations', () => {
                 contextWindow: 100,
                 maxTokens: 10,
               },
+              {
+                id: 'deprecated-m2',
+                name: 'Deprecated model',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+              {
+                id: 'm3',
+                name: 'm3',
+                api: 'pi-router-test-api',
+                status: 'deprecated',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
             ],
           },
         },
@@ -303,8 +318,56 @@ describe('Performance Optimizations', () => {
     );
 
     const syncModels = __testGetSyncModels().map(model => `${model.id}@${model.provider}`);
-    expect(syncModels).toEqual(['m1@Provider-A']);
-    expect(syncModels.some(item => item.includes('claude'))).toBe(false);
+    expect(syncModels).toContain('m1@Provider-A');
+    expect(syncModels.some(item => item.endsWith('@openai-codex'))).toBe(true);
+    expect(syncModels.some(item => item.includes('deprecated'))).toBe(false);
+    expect(syncModels.some(item => item.startsWith('m3@'))).toBe(false);
+  });
+
+  it('does not schedule health probes for deprecated configured routes', () => {
+    fs.writeFileSync(
+      path.join(testDir, 'models.json'),
+      JSON.stringify({
+        providers: {
+          ok: {
+            models: [
+              {
+                id: 'm1',
+                name: 'm1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+          bad: {
+            models: [
+              {
+                id: 'deprecated-m1',
+                name: 'Deprecated m1',
+                api: 'pi-router-test-api',
+                contextWindow: 100,
+                maxTokens: 10,
+              },
+            ],
+          },
+        },
+      }),
+      'utf-8',
+    );
+
+    __testStartHealthProbes({
+      healthProbe: { enabled: true, intervalMs: 600000, timeoutMs: 1000 },
+      models: [
+        {
+          id: 'm1',
+          channels: ['ok', 'bad'],
+          modelByChannel: { bad: 'deprecated-m1' },
+        },
+      ],
+    } as any);
+
+    expect(__testGetHealthProbeTimerKeys()).toEqual(['m1@ok']);
   });
 
   it('refreshes router config from disk into the active config reference', () => {

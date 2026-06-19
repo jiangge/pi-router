@@ -6,23 +6,28 @@
 import { matchesKey, Key, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import type { ChannelScore } from "./config-wizard.js";
 
-type EditState = "browsing" | "moving";
+type EditState = "browsing" | "moving" | "confirmDelete";
+
+type FlatOrderItem = {
+  model: string;
+  channel: string;
+  routeKey: string;
+  upstreamModel?: string;
+  label: string;
+  reason: string;
+  category: string;
+};
 
 export class FlatOrderEditor implements Component {
-  private items: Array<{
-    model: string;
-    channel: string;
-    routeKey: string;
-    upstreamModel?: string;
-    label: string;
-    reason: string;
-    category: string;
-  }>;
+  private items: FlatOrderItem[];
 
   // UI state
   private state: EditState = "browsing";
   private currentIndex = 0;
   private movingFromIndex?: number;
+  private selectedIndices = new Set<number>();
+  private selectionAnchor?: number;
+  private movingSnapshot?: FlatOrderItem[];
 
   // Viewport state
   private viewportHeight = 10;  // Conservative value to ensure cursor always visible with dynamic footer
@@ -115,6 +120,24 @@ export class FlatOrderEditor implements Component {
   }
 
   handleInput(data: string): void {
+    if (this.items.length === 0) {
+      if (data === "c" || data === "C") this.onComplete?.();
+      else if (matchesKey(data, Key.escape)) this.onSkip?.();
+      return;
+    }
+
+    if (this.state === "confirmDelete") {
+      if (matchesKey(data, Key.delete) || matchesKey(data, Key.enter)) {
+        this.deleteSelectedOrCurrent();
+        this.state = "browsing";
+        this.invalidate();
+      } else if (matchesKey(data, Key.escape)) {
+        this.state = "browsing";
+        this.invalidate();
+      }
+      return;
+    }
+
     if (this.state === "browsing") {
       this.handleBrowsingInput(data);
     } else {
@@ -123,7 +146,18 @@ export class FlatOrderEditor implements Component {
   }
 
   private handleBrowsingInput(data: string): void {
-    if (matchesKey(data, Key.up)) {
+    if (matchesKey(data, Key.shift("up"))) {
+      this.extendSelection(-1);
+    } else if (matchesKey(data, Key.shift("down"))) {
+      this.extendSelection(1);
+    } else if (matchesKey(data, Key.space)) {
+      this.toggleSelection(this.currentIndex);
+    } else if (data === "a" || data === "A") {
+      this.selectAll();
+    } else if (matchesKey(data, Key.delete)) {
+      this.state = "confirmDelete";
+      this.invalidate();
+    } else if (matchesKey(data, Key.up)) {
       if (this.currentIndex > 0) {
         this.currentIndex--;
         this.ensureCursorVisible();
@@ -138,38 +172,51 @@ export class FlatOrderEditor implements Component {
     } else if (matchesKey(data, Key.enter)) {
       // Enter moving mode
       this.state = "moving";
-      this.movingFromIndex = this.currentIndex;
+      if (this.selectedIndices.size > 0) {
+        this.movingSnapshot = this.items.map(item => ({ ...item }));
+      } else {
+        this.movingFromIndex = this.currentIndex;
+      }
       this.invalidate();
     } else if (data === "s" || data === "S") {
       this.onSkip?.();
     } else if (data === "c" || data === "C") {
       this.onComplete?.();
     } else if (matchesKey(data, Key.escape)) {
-      this.onSkip?.();
+      if (this.selectedIndices.size > 0) this.clearSelection();
+      else this.onSkip?.();
     }
   }
 
   private handleMovingInput(data: string): void {
     if (matchesKey(data, Key.up)) {
-      this.moveItemUp();
+      if (this.selectedIndices.size > 0) this.moveSelectedUp();
+      else this.moveItemUp();
       this.ensureCursorVisible();
       this.invalidate();
     } else if (matchesKey(data, Key.down)) {
-      this.moveItemDown();
+      if (this.selectedIndices.size > 0) this.moveSelectedDown();
+      else this.moveItemDown();
       this.ensureCursorVisible();
       this.invalidate();
     } else if (matchesKey(data, Key.enter)) {
       // Confirm position
       this.state = "browsing";
       this.movingFromIndex = undefined;
+      this.movingSnapshot = undefined;
+      this.clearSelection();
       this.invalidate();
     } else if (matchesKey(data, Key.escape)) {
       // Cancel move
-      if (this.movingFromIndex !== undefined) {
+      if (this.movingSnapshot) {
+        this.items = this.movingSnapshot;
+        this.clearSelection();
+      } else if (this.movingFromIndex !== undefined) {
         this.restoreItemPosition(this.movingFromIndex);
       }
       this.state = "browsing";
       this.movingFromIndex = undefined;
+      this.movingSnapshot = undefined;
       this.invalidate();
     }
   }
@@ -183,19 +230,25 @@ export class FlatOrderEditor implements Component {
     // Use conservative value (10 lines) to ensure cursor visibility
     // even with dynamic pi footer (which can vary with loaded extensions)
     const calculatedViewportHeight = Math.min(10, itemCount);
+    if (itemCount === 0) {
+      this.currentIndex = 0;
+      this.scrollOffset = 0;
+      this.viewportHeight = 0;
+    } else {
 
-    // Update scrollOffset to ensure cursor is visible
-    if (this.currentIndex < this.scrollOffset) {
-      this.scrollOffset = this.currentIndex;
+      // Update scrollOffset to ensure cursor is visible
+      if (this.currentIndex < this.scrollOffset) {
+        this.scrollOffset = this.currentIndex;
+      }
+
+      if (this.currentIndex >= this.scrollOffset + calculatedViewportHeight) {
+        this.scrollOffset = this.currentIndex - calculatedViewportHeight + 1;
+      }
+
+      const maxScroll = Math.max(0, itemCount - calculatedViewportHeight);
+      this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
+      this.viewportHeight = calculatedViewportHeight;
     }
-
-    if (this.currentIndex >= this.scrollOffset + calculatedViewportHeight) {
-      this.scrollOffset = this.currentIndex - calculatedViewportHeight + 1;
-    }
-
-    const maxScroll = Math.max(0, itemCount - calculatedViewportHeight);
-    this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll));
-    this.viewportHeight = calculatedViewportHeight;
 
     // Check cache after ensuring cursor visibility
     if (this.cachedLines && this.cachedWidth === width) {
@@ -206,6 +259,14 @@ export class FlatOrderEditor implements Component {
 
     lines.push(this.theme.fg("accent", this.theme.bold("Step 6/6: Adjust Order (Custom Mode)")));
     lines.push("");
+    if (this.items.length === 0) {
+      lines.push(this.theme.fg("dim", "No model/channel pairs remaining"));
+      lines.push("");
+      lines.push(this.theme.fg("dim", "c complete • esc cancel"));
+      this.cachedLines = lines.map(line => truncateToWidth(line, width));
+      this.cachedWidth = width;
+      return this.cachedLines;
+    }
     lines.push(this.theme.fg("dim", `All model@channel combinations  [${this.currentIndex + 1}/${this.items.length}]`));
     lines.push(this.theme.fg("dim", "Freely reorder any item"));
     lines.push("");
@@ -215,6 +276,7 @@ export class FlatOrderEditor implements Component {
 
     this.items.forEach((item, idx) => {
       const isCurrent = idx === this.currentIndex;
+      const isSelected = this.selectedIndices.has(idx);
 
       // Build marker
       let marker = "  ";
@@ -222,6 +284,8 @@ export class FlatOrderEditor implements Component {
         marker = "◆→";
       } else if (isCurrent) {
         marker = "▸ ";
+      } else if (isSelected) {
+        marker = "● ";
       }
 
       const num = `${idx + 1}.`.padEnd(4);
@@ -236,6 +300,8 @@ export class FlatOrderEditor implements Component {
         lineText = this.theme.bg("selectedBg", this.theme.fg("accent", lineText));
       } else if (isCurrent) {
         lineText = this.theme.fg("accent", lineText);
+      } else if (isSelected) {
+        lineText = this.theme.fg("success", lineText);
       }
 
       itemListLines.push({ text: lineText, index: idx });
@@ -265,10 +331,14 @@ export class FlatOrderEditor implements Component {
 
     // Instructions
     lines.push("");
-    if (this.state === "browsing") {
-      lines.push(this.theme.fg("dim", "↑↓ navigate • enter select • s skip • c complete"));
+    if (this.state === "confirmDelete") {
+      const count = this.selectedIndices.size || 1;
+      lines.push(this.theme.fg("warning", `Delete ${count} selected model/channel pair${count === 1 ? "" : "s"}? delete/enter confirm • esc cancel`));
+    } else if (this.state === "browsing") {
+      lines.push(this.theme.fg("dim", "↑↓ navigate • space select • shift+↑↓ range • a all • delete remove • enter move • esc clear/cancel • c complete"));
     } else {
-      lines.push(this.theme.fg("accent", "[MOVING] ↑↓ reorder • enter confirm • esc cancel"));
+      const moving = this.selectedIndices.size > 0 ? `${this.selectedIndices.size} selected` : "current";
+      lines.push(this.theme.fg("accent", `[MOVING ${moving}] ↑↓ reorder • enter confirm • esc cancel`));
     }
 
     this.cachedLines = lines.map(line => truncateToWidth(line, width));
@@ -279,6 +349,44 @@ export class FlatOrderEditor implements Component {
   invalidate(): void {
     this.cachedWidth = undefined;
     this.cachedLines = undefined;
+  }
+
+  private toggleSelection(index: number): void {
+    if (this.selectedIndices.has(index)) this.selectedIndices.delete(index);
+    else this.selectedIndices.add(index);
+    this.selectionAnchor = index;
+    this.invalidate();
+  }
+
+  private clearSelection(): void {
+    this.selectedIndices.clear();
+    this.selectionAnchor = undefined;
+    this.invalidate();
+  }
+
+  private selectAll(): void {
+    this.selectedIndices = new Set(this.items.map((_, index) => index));
+    this.selectionAnchor = this.currentIndex;
+    this.invalidate();
+  }
+
+  private extendSelection(delta: -1 | 1): void {
+    const anchor = this.selectionAnchor ?? this.currentIndex;
+    const nextIndex = Math.max(0, Math.min(this.items.length - 1, this.currentIndex + delta));
+    this.currentIndex = nextIndex;
+    const [start, end] = [Math.min(anchor, nextIndex), Math.max(anchor, nextIndex)];
+    for (let index = start; index <= end; index++) this.selectedIndices.add(index);
+    this.selectionAnchor = anchor;
+    this.ensureCursorVisible();
+    this.invalidate();
+  }
+
+  private deleteSelectedOrCurrent(): void {
+    const deleteIndices = this.selectedIndices.size > 0 ? Array.from(this.selectedIndices) : [this.currentIndex];
+    const toDelete = new Set(deleteIndices);
+    this.items = this.items.filter((_, index) => !toDelete.has(index));
+    this.currentIndex = Math.max(0, Math.min(this.currentIndex, this.items.length - 1));
+    this.clearSelection();
   }
 
   private ensureCursorVisible(): void {
@@ -312,6 +420,30 @@ export class FlatOrderEditor implements Component {
     if (idx < this.items.length - 1) {
       [this.items[idx], this.items[idx + 1]] = [this.items[idx + 1], this.items[idx]];
       this.currentIndex++;
+    }
+  }
+
+  private moveSelectedUp(): void {
+    const sorted = Array.from(this.selectedIndices).sort((a, b) => a - b);
+    for (const idx of sorted) {
+      if (idx > 0 && !this.selectedIndices.has(idx - 1)) {
+        [this.items[idx - 1], this.items[idx]] = [this.items[idx], this.items[idx - 1]];
+        this.selectedIndices.delete(idx);
+        this.selectedIndices.add(idx - 1);
+        if (this.currentIndex === idx) this.currentIndex = idx - 1;
+      }
+    }
+  }
+
+  private moveSelectedDown(): void {
+    const sorted = Array.from(this.selectedIndices).sort((a, b) => b - a);
+    for (const idx of sorted) {
+      if (idx < this.items.length - 1 && !this.selectedIndices.has(idx + 1)) {
+        [this.items[idx], this.items[idx + 1]] = [this.items[idx + 1], this.items[idx]];
+        this.selectedIndices.delete(idx);
+        this.selectedIndices.add(idx + 1);
+        if (this.currentIndex === idx) this.currentIndex = idx + 1;
+      }
     }
   }
 

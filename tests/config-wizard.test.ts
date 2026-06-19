@@ -72,8 +72,12 @@ const theme = {
 const key = {
   up: '\x1b[A',
   down: '\x1b[B',
+  shiftUp: '\x1b[1;2A',
+  shiftDown: '\x1b[1;2B',
   enter: '\r',
   escape: '\x1b',
+  delete: '\x1b[3~',
+  space: ' ',
   tab: '\t',
 };
 
@@ -208,7 +212,7 @@ describe('config order adjustment helpers', () => {
       healthProbe: { enabled: false },
       contextTransfer: 'summary',
       lastSyncHash: 'models-hash',
-      models: [{ id: 'm1', channels: ['a', 'b'] }],
+      models: [{ id: 'm1', channels: ['b', 'a'] }],
       customOrder: ['m1@b', 'm1@a'],
     });
     expect(ctx.notifications.at(-1)?.message).toContain('Configuration Complete');
@@ -326,6 +330,33 @@ describe('config order adjustment helpers', () => {
     expect(ctx.notifications.at(-1)?.message).toContain('Order Updated');
   });
 
+  it('deletes multiple selected model/channel pairs in channel-first order wizard', async () => {
+    const ctx = createInteractiveCtx([
+      [key.tab, key.space, key.down, key.space, key.delete, key.enter, 'c'],
+    ]);
+    const originalConfig = {
+      strategy: 'channelFirst',
+      sortBy: 'manual',
+      models: [{ id: 'm1', channels: ['a', 'b', 'c'] }],
+    } as any;
+    let savedConfig: any;
+
+    await runConfigOrderWizard(
+      ctx,
+      originalConfig,
+      () => [
+        { id: 'm1', provider: 'a', baseUrl: 'https://a.example/v1' },
+        { id: 'm1', provider: 'b', baseUrl: 'https://b.example/v1' },
+        { id: 'm1', provider: 'c', baseUrl: 'https://c.example/v1' },
+      ],
+      (config) => {
+        savedConfig = config;
+      },
+    );
+
+    expect(savedConfig.models).toEqual([{ id: 'm1', channels: ['c'] }]);
+  });
+
   it('runs order wizard and saves customRoutes for duplicate-provider variants', async () => {
     const ctx = createInteractiveCtx([
       ['c'],
@@ -377,10 +408,66 @@ describe('config order adjustment helpers', () => {
       aliases: ['oc/deepseek-v4-flash-free'],
       channels: ['wx-api'],
       routes: [
-        { channel: 'wx-api' },
         { channel: 'wx-api', model: 'oc/deepseek-v4-flash-free' },
+        { channel: 'wx-api' },
       ],
     });
+  });
+
+  it('deletes multiple selected model/channel pairs in custom order wizard', async () => {
+    const ctx = createInteractiveCtx([
+      [key.space, key.down, key.space, key.delete, key.enter, 'c'],
+    ]);
+    const originalConfig = {
+      strategy: 'custom',
+      sortBy: 'manual',
+      models: [
+        { id: 'm1', channels: ['a', 'b'] },
+      ],
+      customOrder: ['m1@a', 'm1@b'],
+    } as any;
+    let savedConfig: any;
+
+    await runConfigOrderWizard(
+      ctx,
+      originalConfig,
+      () => [
+        { id: 'm1', provider: 'a', baseUrl: 'https://a.example/v1' },
+        { id: 'm1', provider: 'b', baseUrl: 'https://b.example/v1' },
+      ],
+      (config) => {
+        savedConfig = config;
+      },
+    );
+
+    expect(savedConfig.customOrder).toEqual([]);
+    expect(savedConfig.customRoutes).toEqual([]);
+    expect(savedConfig.models).toEqual([]);
+  });
+
+  it('moves a shift-selected channel range as a group', () => {
+    const editor = new TwoTierOrderEditor(
+      [
+        {
+          id: 'm1',
+          channels: [
+            { channel: 'a', score: 50, reason: 'r', category: 'aggregator' },
+            { channel: 'b', score: 50, reason: 'r', category: 'aggregator' },
+            { channel: 'c', score: 50, reason: 'r', category: 'aggregator' },
+            { channel: 'd', score: 50, reason: 'r', category: 'aggregator' },
+          ],
+        },
+      ],
+      theme,
+    );
+
+    editor.handleInput(key.tab);
+    editor.handleInput(key.shiftDown);
+    editor.handleInput(key.enter);
+    editor.handleInput(key.down);
+    editor.handleInput(key.enter);
+
+    expect(editor.getResult()[0].channels).toEqual(['c', 'a', 'b', 'd']);
   });
 
   it('builds editable models from current config order and appends discovered channels', () => {
@@ -483,7 +570,7 @@ describe('config order adjustment helpers', () => {
 
     editor.handleInput(key.down);
     editor.handleInput(key.enter);
-    expect(editor.render(80).join('\n')).toContain('[MOVING]');
+    expect(editor.render(80).join('\n')).toContain('[MOVING current]');
     editor.handleInput(key.up);
     editor.handleInput(key.enter);
     expect(editor.getResult()).toEqual(['m1@b', 'm1@a', 'm1@c']);

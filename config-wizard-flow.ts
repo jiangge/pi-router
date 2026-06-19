@@ -100,13 +100,44 @@ function orderStringsToCustomRoutes(order: string[], models: EditableWizardModel
     const [modelId, routeKey] = item.split("@");
     if (!modelId || !routeKey) return [];
     const model = byModel.get(modelId);
-    const channel = model?.channels.find(ch => (ch.routeKey || ch.channel) === routeKey || ch.channel === routeKey);
+    const [channelName, upstreamFromRouteKey] = routeKey.split("#");
+    const channel = model?.channels.find(ch =>
+      (ch.routeKey || ch.channel) === routeKey ||
+      (ch.channel === channelName && (!upstreamFromRouteKey || ch.upstreamModel === upstreamFromRouteKey)) ||
+      ch.channel === routeKey
+    );
+    const upstreamModel = channel?.upstreamModel || upstreamFromRouteKey;
     return [{
       model: modelId,
-      channel: channel?.channel || routeKey,
-      ...(channel?.upstreamModel && channel.upstreamModel !== modelId ? { upstreamModel: channel.upstreamModel } : {}),
+      channel: channel?.channel || channelName || routeKey,
+      ...(upstreamModel && upstreamModel !== modelId ? { upstreamModel } : {}),
     }];
   });
+}
+
+function customOrderToConfigModels(order: string[], models: EditableWizardModel[]): NonNullable<RouterConfig["models"]> {
+  const customRoutes = orderStringsToCustomRoutes(order, models);
+  const routesByModel = new Map<string, Array<{ channel: string; upstreamModelId: string }>>();
+  for (const route of customRoutes) {
+    const routes = routesByModel.get(route.model) || [];
+    routes.push({
+      channel: route.channel,
+      upstreamModelId: route.upstreamModel || route.model,
+    });
+    routesByModel.set(route.model, routes);
+  }
+
+  return models.flatMap((model) => {
+    const routes = routesByModel.get(model.id);
+    if (!routes || routes.length === 0) return [];
+    const serialized = serializeRouteEntriesForConfig(model.id, routes);
+    return [{
+      id: model.id,
+      channels: serialized.channels,
+      ...(serialized.modelByChannel ? { modelByChannel: serialized.modelByChannel } : {}),
+      ...(serialized.routes ? { routes: serialized.routes } : {}),
+    }];
+  }) as NonNullable<RouterConfig["models"]>;
 }
 
 function customRoutesToInitialOrder(routes: RouterCustomRouteConfig[] | undefined, fallbackOrder: string[] | undefined, models: EditableWizardModel[]): string[] | undefined {
@@ -289,7 +320,7 @@ export async function runConfigWizard(
 
     if (wizardConfig.strategy === "custom") {
       const orderStrings = orderResult as string[];
-      finalConfig.models = multiChannelModels.map(editableModelToConfigModel);
+      finalConfig.models = customOrderToConfigModels(orderStrings, multiChannelModels);
       finalConfig.customOrder = orderStrings;
       finalConfig.customRoutes = orderStringsToCustomRoutes(orderStrings, multiChannelModels);
     } else {
@@ -357,6 +388,10 @@ export async function runConfigOrderWizard(
 
   if (strategy === "custom") {
     const orderStrings = orderResult as string[];
+    nextConfig.models = customOrderToConfigModels(orderStrings, editableModels).map((orderedModel) => {
+      const existing = config.models?.find(configModel => configModel.id === orderedModel.id) || { id: orderedModel.id, channels: [] };
+      return { ...existing, ...orderedModel };
+    });
     nextConfig.customOrder = orderStrings;
     nextConfig.customRoutes = orderStringsToCustomRoutes(orderStrings, editableModels);
   } else {

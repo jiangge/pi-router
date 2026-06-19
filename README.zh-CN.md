@@ -160,13 +160,14 @@ pi-router 会：
 ### 管理
 
 ```text
-/router sync             # 检查 models.json 显式声明的模型变更
-/router sync accept      # 应用 models.json 显式声明的模型变更
+/router sync             # 检查 models.json 与 auth-only builtin 模型变更
+/router sync accept      # 应用检测到的模型变更
 /router diff             # 预览配置差异
 ```
 
-`/router sync` 只同步 `models.json` 中显式声明的 provider 与模型，
-不会把 `auth.json` 触发发现的 builtin 模型写入 router 配置。
+`/router sync` 会同步 `models.json` 中显式声明的 provider 与模型，
+也会同步只在 `auth.json` 中认证过的 provider 对应的 builtin 模型。
+显式配置为 `models: []` 的 provider 仍保持禁用。已废弃模型会被静默过滤。
 
 ## 工作原理
 

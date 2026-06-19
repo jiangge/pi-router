@@ -160,13 +160,15 @@ Shortcuts:
 ### Management
 
 ```text
-/router sync             # Check explicit models.json changes
-/router sync accept      # Apply explicit models.json changes
+/router sync             # Check models.json and auth-only builtin changes
+/router sync accept      # Apply detected model changes
 /router diff             # Preview config differences
 ```
 
-`/router sync` only syncs providers and models explicitly declared in `models.json`.
-It does not import auth-only builtin models discovered from `auth.json`.
+`/router sync` syncs providers and models explicitly declared in `models.json`,
+plus builtin models for authenticated providers that appear only in `auth.json`.
+Providers explicitly declared with `models: []` stay disabled. Deprecated models
+are filtered silently.
 
 ## How It Works
 

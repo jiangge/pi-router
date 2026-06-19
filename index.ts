@@ -54,6 +54,10 @@ type PiModel = {
   maxTokens?: number;
   cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
   input?: string[];
+  deprecated?: boolean;
+  status?: string;
+  state?: string;
+  lifecycle?: string;
 };
 
 type PiRouteSnapshot = {
@@ -456,6 +460,31 @@ function normalizeModelForProvider(model: PiModel): PiModel {
   };
 }
 
+const DEPRECATED_MODEL_STATES = new Set(["deprecated", "retired", "sunset", "disabled"]);
+
+function textMarksDeprecated(value: unknown): boolean {
+  return typeof value === "string" && value.toLowerCase().includes("deprecated");
+}
+
+function isDeprecatedModel(model: Partial<PiModel> | undefined): boolean {
+  if (!model) return false;
+  if ((model as any).deprecated === true) return true;
+  const status = typeof (model as any).status === "string" ? (model as any).status.toLowerCase() : undefined;
+  const state = typeof (model as any).state === "string" ? (model as any).state.toLowerCase() : undefined;
+  const lifecycle = typeof (model as any).lifecycle === "string" ? (model as any).lifecycle.toLowerCase() : undefined;
+  return (
+    (!!status && DEPRECATED_MODEL_STATES.has(status)) ||
+    (!!state && DEPRECATED_MODEL_STATES.has(state)) ||
+    (!!lifecycle && DEPRECATED_MODEL_STATES.has(lifecycle)) ||
+    textMarksDeprecated(model.id) ||
+    textMarksDeprecated(model.name)
+  );
+}
+
+function isDeprecatedModelId(id: unknown): boolean {
+  return textMarksDeprecated(id);
+}
+
 /**
  * Merge headers and compat from multiple sources with correct precedence
  * FIX #11: Extract duplicated merge logic into shared helper
@@ -648,6 +677,10 @@ function modelsFromRegistry(modelRegistry: any): PiModel[] | undefined {
       maxTokens: model.maxTokens,
       cost: model.cost,
       input: model.input,
+      deprecated: model.deprecated,
+      status: model.status,
+      state: model.state,
+      lifecycle: model.lifecycle,
     }));
   } catch (err) {
     debugLog("[pi-router] Failed to read models from model registry:", err);
@@ -663,7 +696,8 @@ function filterConfigurableModels(models: PiModel[], allowedProviders: Set<strin
   return models.filter((model) =>
     model.provider !== "router" &&
     model.api !== ROUTER_API &&
-    allowedProviders.has(model.provider)
+    allowedProviders.has(model.provider) &&
+    !isDeprecatedModel(model)
   );
 }
 
@@ -680,7 +714,7 @@ function getConfigurableModels(modelRegistry?: any, forceRefresh = false): PiMod
 function buildModelMap(models: PiModel[]): Map<string, PiModel> {
   const modelMap = new Map<string, PiModel>();
   for (const model of models) {
-    if (model.provider === "router" || model.api === ROUTER_API) {
+    if (model.provider === "router" || model.api === ROUTER_API || isDeprecatedModel(model)) {
       continue;
     }
     modelMap.set(`${model.id}@${model.provider}`, model);
@@ -716,7 +750,7 @@ function checkAutoSyncOnce(): void {
     debugLog("[pi-router] Checking for models.json changes...");
 
     const models = getSyncModels();
-    const modelsJsonHash = calculateFileHash(getModelsJsonPath());
+    const modelsJsonHash = calculateSyncSourceHash();
 
     if (autoSyncConfig.lastSyncHash !== modelsJsonHash) {
       const diff = detectModelChanges(autoSyncConfig, models);
@@ -755,6 +789,15 @@ function calculateFileHash(filePath: string, forceRefresh = false): string {
     console.warn("[pi-router] Failed to calculate file hash:", err);
     return "";
   }
+}
+
+function calculateSyncSourceHash(forceRefresh = false): string {
+  const modelsHash = calculateFileHash(getModelsJsonPath(), forceRefresh);
+  const authHash = calculateFileHash(path.join(getPiConfigDir(), "auth.json"), forceRefresh);
+  return crypto
+    .createHash("sha256")
+    .update(`models:${modelsHash}\nauth:${authHash}`)
+    .digest("hex");
 }
 
 // Cache for loaded models to avoid re-parsing on every call
@@ -818,13 +861,15 @@ function loadModelsJson(forceRefresh = false): PiModel[] {
       allModels.push(...expandProviderModels(providerName, {}));
     }
     
+    const visibleModels = allModels.filter(model => !isDeprecatedModel(model));
+
     // Update cache
-    modelsCache = allModels;
+    modelsCache = visibleModels;
     modelsCacheTimestamp = now;
     modelsCacheModelsMtime = modelsMtime;
     modelsCacheAuthMtime = authMtime;
     
-    return allModels;
+    return visibleModels;
   } catch (err) {
     console.error("[pi-router] Failed to load models.json:", err);
     return [];
@@ -1179,8 +1224,15 @@ function detectModelChanges(config: RouterConfig, currentModels: PiModel[]): Mod
 
 function getSyncModels(): PiModel[] {
   const explicitModels = loadExplicitModelsJson();
-  const { modelsProviders } = loadProviderIds(true);
-  return filterConfigurableModels(explicitModels, new Set(modelsProviders));
+  const { authProviders, modelsProviders } = loadProviderIds(true);
+  const configuredProviders = new Set(modelsProviders);
+  const authOnlyModels = authProviders.flatMap((providerName) =>
+    configuredProviders.has(providerName) ? [] : expandProviderModels(providerName, {})
+  );
+  return filterConfigurableModels(
+    [...explicitModels, ...authOnlyModels],
+    new Set([...modelsProviders, ...authProviders])
+  );
 }
 
 function normalizeRecord(record: Record<string, string> | undefined): Record<string, string> {
@@ -1657,7 +1709,7 @@ async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
         () => getConfigurableModels(ctx.modelRegistry, true),
         groupModelsByChannels,
         saveConfig,
-        calculateFileHash,
+        () => calculateSyncSourceHash(true),
         getModelsJsonPath
       );
       break;
@@ -2263,7 +2315,7 @@ export default function (pi: ExtensionAPI) {
       if (autoModels.length > 0) {
         debugLog(`[pi-router] Auto-discovered ${autoModels.length} multi-channel models`);
         config.models = autoModels;
-        const modelsJsonHash = calculateFileHash(getModelsJsonPath());
+        const modelsJsonHash = calculateSyncSourceHash();
         config.lastSyncHash = modelsJsonHash;
         saveConfig(config);
         autoSyncChecked = true; // Already checked during auto-discovery
@@ -2448,7 +2500,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
         () => getConfigurableModels(ctx.modelRegistry, true),
         groupModelsByChannels,
         saveConfig,
-        calculateFileHash,
+        () => calculateSyncSourceHash(true),
         getModelsJsonPath
       );
     } else if (matchedSubcmd === "order") {
@@ -2735,7 +2787,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
       }
       
       // Update sync hash
-      const modelsJsonHash = calculateFileHash(getModelsJsonPath(), true);
+      const modelsJsonHash = calculateSyncSourceHash(true);
       config.lastSyncHash = modelsJsonHash;
       
       saveConfig(config);
@@ -5366,6 +5418,7 @@ const healthProber = {
   timeoutMs: 10 * 1000,       // 10 seconds
   probeMessage: "ping",
   timers: new Map<string, NodeJS.Timeout>(),
+  initialTimers: new Set<NodeJS.Timeout>(),
   lastProbe: new Map<string, HealthProbeResult>(),
 };
 
@@ -5386,8 +5439,19 @@ function startHealthProbes(config: RouterConfig): void {
   debugLog(`[pi-router] Starting health probes (interval: ${healthProber.intervalMs}ms)`);
   
   // Probe all configured routes. Route keys distinguish same-provider variants.
+  const modelMap = getCachedModelMap(routerState.currentModelRegistry);
   for (const modelConfig of config.models) {
+    if (isDeprecatedModelId(modelConfig.id)) {
+      continue;
+    }
     for (const routeEntry of getModelRouteEntries(modelConfig)) {
+      if (isDeprecatedModelId(routeEntry.upstreamModelId)) {
+        continue;
+      }
+      const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
+      if (!route || isDeprecatedModel(route.model)) {
+        continue;
+      }
       const key = getRouteStateKey(modelConfig.id, routeEntry.routeKey);
       scheduleProbe(key, modelConfig, routeEntry, config);
     }
@@ -5418,9 +5482,11 @@ function scheduleProbe(
 
   // Delay initial probe by 30 seconds to avoid startup noise
   // This gives pi time to fully initialize before probing
-  setTimeout(() => {
+  const initialTimer = setTimeout(() => {
+    healthProber.initialTimers.delete(initialTimer);
     probeChannel(key, modelConfig, routeEntry, config);
   }, 30000);
+  healthProber.initialTimers.add(initialTimer);
 }
 
 /**
@@ -5533,8 +5599,12 @@ function stopHealthProbes(): void {
   for (const timer of healthProber.timers.values()) {
     clearInterval(timer);
   }
+  for (const timer of healthProber.initialTimers.values()) {
+    clearTimeout(timer);
+  }
   
   healthProber.timers.clear();
+  healthProber.initialTimers.clear();
   healthProber.enabled = false;
 }
 
@@ -5570,7 +5640,16 @@ function __testResetInternalState(): void {
   latencyTracker.records.clear();
   healthChecker.status.clear();
   circuitBreaker.circuits.clear();
+  for (const timer of healthProber.timers.values()) {
+    clearInterval(timer);
+  }
+  for (const timer of healthProber.initialTimers.values()) {
+    clearTimeout(timer);
+  }
+  healthProber.timers.clear();
+  healthProber.initialTimers.clear();
   healthProber.lastProbe.clear();
+  healthProber.enabled = false;
   decisionLogger.decisions.length = 0;
   fileHashCache.clear();
   providerIdsCache = null;
@@ -5651,6 +5730,14 @@ function __testRegisterRoutingAdapter(): void {
   registerRoutingAdapter();
 }
 
+function __testStartHealthProbes(config: RouterConfig): void {
+  startHealthProbes(config);
+}
+
+function __testGetHealthProbeTimerKeys(): string[] {
+  return Array.from(healthProber.timers.keys());
+}
+
 function __testCalculateFileHash(filePath: string): string {
   return calculateFileHash(filePath);
 }
@@ -5710,5 +5797,7 @@ export {
   __testGetConfigurableModels,
   __testGetSyncModels,
   __testRegisterRoutingAdapter,
+  __testStartHealthProbes,
+  __testGetHealthProbeTimerKeys,
   __testCalculateFileHash,
 };
