@@ -5,6 +5,22 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-06-19
+
+### Added
+
+- **Auth-only builtin sync**: `/router sync` now imports builtin models for authenticated providers found only in `auth.json`, while still respecting explicit `models: []` provider disables in `models.json`.
+- **Config multi-select editing**: `/router config order` now supports selecting multiple models, channels, or custom model/channel pairs with `Space`, range selection with `Shift+Up/Down`, select-all with `a`, grouped movement with `Enter`, and confirmed deletion with `Delete`.
+
+### Fixed
+
+- **Deprecated model filtering**: Deprecated models are silently filtered from sync candidates, configurable model discovery, model maps, and health probe scheduling. The filter covers structured deprecation fields and model IDs/names containing `deprecated`.
+- **Custom route persistence**: Custom strategy saves now rebuild `models`, `customOrder`, and `customRoutes` from the remaining model/channel pairs so deleted pairs do not leave stale config entries.
+
+### Tests
+
+- Expanded regression coverage to 81 passing tests, including auth-only sync, deprecated filtering, health probe scheduling, and multi-select config editing.
+
 ## [0.4.0] - 2026-06-18
 
 ### Added

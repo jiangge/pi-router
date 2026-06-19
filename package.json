@@ -1,6 +1,6 @@
 {
   "name": "pi-router",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Intelligent routing layer for pi coding agent with multi-level failover, circuit breaker, and comprehensive observability",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
