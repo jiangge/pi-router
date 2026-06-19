@@ -146,15 +146,15 @@ This checklist ensures pi-router is ready for publication.
 
 ## Publication
 
-- [ ] `npm login` successful
+- [x] npm authentication successful
 - [x] `npm publish --dry-run` succeeds
 - [x] Review dry-run output
-- [ ] `npm publish` succeeds
-- [ ] Package appears on npmjs.com
+- [x] `npm publish` succeeds
+- [x] Package appears on npmjs.com
 - [ ] Package page looks correct
-- [ ] Installation from npm works
-- [ ] GitHub release created
-- [ ] Release notes published
+- [x] Installation from npm works
+- [x] GitHub release created
+- [x] Release notes published
 
 ## Post-Publication
 
@@ -174,24 +174,23 @@ Current status:
 - Version bumped to 0.4.1 because 0.4.0 already exists on npm.
 - Auth-only builtin sync and config multi-select editing are implemented.
 - Deprecated model filtering covers sync/config/modelMap/health probes.
-- Typecheck, tests, build, npm pack, verify.sh, and npm publish dry-run pass.
-- GitHub repository is public and reachable via gh.
-- npm registry already has 0.4.0; 0.4.1 is not published yet.
+- Typecheck, tests, build, npm pack, verify.sh, npm publish dry-run, and real npm publish pass.
+- GitHub repository is public, tag v0.4.1 is pushed, and GitHub release is published.
+- npm registry latest is 0.4.1, published 2026-06-19T04:52:06Z.
+- npm install from registry works and installs pi-router@0.4.1 with dist files present.
 
 Known limitations:
-- npm login is not active on this machine, so real `npm publish` cannot be completed here.
-- GitHub release is not created yet; create it after the publish target is finalized.
 - Full interactive `/router` command verification still needs manual TUI testing.
+- npm package page has not been visually inspected in a browser.
 - Strict TypeScript mode disabled
 - Performance benchmarks not yet measured beyond automated unit/smoke checks
 - Real-world usage data not yet collected
 
 Next steps:
-1. Run `npm login` or provide an npm token.
-2. Publish `pi-router@0.4.1`.
-3. Create tag/release `v0.4.1` on GitHub.
-4. Test installation from npm and run manual `/router` command checks.
-5. Collect feedback and monitor issues.
+1. Visually inspect the npm package page.
+2. Test `pi install npm:pi-router`.
+3. Run manual `/router` command checks in pi.
+4. Collect feedback and monitor issues.
 
 ## Notes
 
@@ -212,6 +211,6 @@ Ready to publish when:
 - [ ] Critical "Commands Verification" items checked
 - [ ] No blocking issues found
 
-Status: **READY FOR NPM LOGIN / PUBLISH PHASE**
+Status: **PUBLISHED / POST-PUBLICATION VERIFICATION PHASE**
 
-Next action: Log in to npm, publish `0.4.1`, create GitHub release, then complete manual command verification.
+Next action: Inspect the npm package page, test `pi install npm:pi-router`, then complete manual `/router` command verification.
