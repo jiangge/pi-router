@@ -60,8 +60,8 @@ pi install /path/to/pi-router
 
 1. 路由策略（`channelFirst` / `custom`）
 2. 排序策略（`latency` / `capabilityFirst` / `cost` / `manual`）
-3. 自动同步（`启用` / `禁用`）
-4. 健康探测（`10 分钟` / `禁用`）
+3. 自动同步（推荐 `启用` / `禁用`）
+4. 健康探测（推荐 `禁用` / `10 分钟`）
 5. 粘性模式（`启用` / `禁用`）
 6. 可选：调整通道顺序
 
@@ -309,13 +309,18 @@ custom:       按 customOrder 中显式配置的 model@channel 顺序尝试
     "cooldownMs": 60000
   },
   "healthProbe": {
-    "enabled": true,
+    "enabled": false,
     "intervalMs": 600000,
     "timeoutMs": 10000,
     "probeMessage": "ping"
   }
 }
 ```
+
+后台功能默认值：
+
+- `autoSync` 默认为 `true`。它只检查本地 `models.json`/`auth.json` 变化并提示同步；不会执行健康探测，也不会调用模型提供商。
+- `healthProbe.enabled` 默认为 `false`，并且是后台健康检测的唯一开关。如果设为 `true`，pi-router 会按 `intervalMs` 间隔把 `probeMessage` 发送给真实上游模型（例如每 10 分钟一次）。这些是真实 API 调用，可能产生额外用量/费用。
 
 Footer 默认行为：
 

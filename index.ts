@@ -134,7 +134,7 @@ type RouterConfig = {
   stickyRecords?: Record<string, StickyRecord>;  // Persistent sticky state per model
   intent?: "suggest" | "auto" | "off";
   logDir?: string | null;
-  autoSync?: boolean;  // Auto-detect models.json changes and prompt user
+  autoSync?: boolean;  // Auto-detect local models.json/auth.json changes and prompt user; does not run health probes
   lastSyncHash?: string;  // Hash of models.json at last sync
   contextTransfer?: "none" | "summary" | "full";  // Context transfer strategy on model switch
   summaryModel?: string;  // Optional dedicated summary model id or id@provider; default uses target model
@@ -1313,7 +1313,8 @@ function loadConfig(): RouterConfig {
     return {
       strategy: "channelFirst",
       auto: false,  // Disabled to avoid slow startup on every launch
-      autoSync: false,
+      autoSync: true,
+      healthProbe: { enabled: false },
       models: [],
     };
   }
@@ -1324,6 +1325,7 @@ function loadConfig(): RouterConfig {
     return {
       strategy: "channelFirst",
       auto: true,
+      // Default on: only checks local models.json/auth.json changes; health probes remain controlled by healthProbe.enabled.
       autoSync: true,
       ...config,
     };
@@ -1333,6 +1335,7 @@ function loadConfig(): RouterConfig {
       strategy: "channelFirst",
       auto: true,
       autoSync: true,
+      healthProbe: { enabled: false },
       models: [],
     };
   }
@@ -1373,10 +1376,10 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
     auto: config.auto ?? true,
     _comment_sortBy: "排序策略: latency(延迟) / capabilityFirst(能力) / cost(成本) / manual(手动)",
     sortBy: config.sortBy ?? "latency",
-    _comment_autoSync: "自动同步: true=从 models.json 自动发现多通道模型；false=手动维护 models",
+    _comment_autoSync: "自动同步(默认 true): true=检查 models.json/auth.json 变化并提示同步；false=手动维护 models；不会触发健康探测",
     autoSync: config.autoSync ?? true,
     lastSyncHash: config.lastSyncHash,
-    _comment_healthProbe: "健康探测: enabled=true 时每 intervalMs 毫秒探测一次",
+    _comment_healthProbe: "健康探测(默认关闭): enabled=true 时会每 intervalMs 毫秒向真实模型发送 probeMessage，请求会产生额外用量/费用；false=不发起后台模型调用",
     healthProbe: config.healthProbe ?? { enabled: false },
     _comment_sticky: "粘性模式: true=优先复用上次成功通道，提高缓存命中率",
     sticky: config.sticky ?? true,
@@ -1438,8 +1441,8 @@ function writeConfigReadme(configPath: string): void {
 - \`strategy\`: \`channelFirst\` 或 \`custom\`
 - \`auto\`: 是否注册 \`router/auto\` 并支持首次自动发现
 - \`sortBy\`: \`latency\` / \`capabilityFirst\` / \`cost\` / \`manual\`
-- \`autoSync\`: 是否从 models.json 自动同步多通道模型
-- \`healthProbe.enabled\`: 是否启用健康探测
+- \`autoSync\`: 是否检查 models.json/auth.json 变化并提示同步（默认 true；不会触发健康探测）
+- \`healthProbe.enabled\`: 是否启用健康探测（默认 false；启用后会定时真实调用模型，可能产生额外费用）
 - \`sticky\`: 是否优先复用上次成功通道
 - \`request\`: 请求超时、重试与 maxTokens 控制
 - \`footer.rightAlignRoute\`: 默认 true；设为 false 可保留 pi 内置 footer
@@ -1492,6 +1495,29 @@ function matchConfigSubcommand(input: string): string | null {
 /**
  * Show current configuration
  */
+let healthProbeCostWarningShown = false;
+
+function maybeNotifyHealthProbeCost(ctx: any, config: RouterConfig): void {
+  if (config.healthProbe?.enabled !== true) {
+    healthProbeCostWarningShown = false;
+    return;
+  }
+  if (healthProbeCostWarningShown || typeof ctx?.ui?.notify !== "function") {
+    return;
+  }
+
+  healthProbeCostWarningShown = true;
+  const intervalMs = config.healthProbe.intervalMs || 5 * 60 * 1000;
+  const intervalSeconds = Math.floor(intervalMs / 1000);
+  ctx.ui.notify(
+    "健康探测已启用\n\n" +
+    `pi-router 会每 ${intervalSeconds} 秒向已配置的真实模型发送一次探测消息。` +
+    "这些是真实 API 调用，可能产生额外用量/费用。\n\n" +
+    "如需关闭，请将 ~/.pi/agent/pi-router.json 中的 healthProbe.enabled 设为 false，然后运行 /reload。",
+    "warning"
+  );
+}
+
 function showCurrentConfig(ctx: any, config: RouterConfig): void {
   const lines: string[] = [];
   
@@ -1504,7 +1530,11 @@ function showCurrentConfig(ctx: any, config: RouterConfig): void {
   lines.push(`  路由策略: ${config.strategy || "channelFirst"}`);
   lines.push(`  排序策略: ${config.sortBy || "latency"}`);
   lines.push(`  自动同步: ${config.autoSync !== false ? "启用" : "禁用"}`);
-  lines.push(`  健康探测: ${config.healthProbe?.enabled ? "启用" : "禁用"}`);
+  lines.push(`  健康探测: ${config.healthProbe?.enabled === true ? "启用" : "禁用"}`);
+  if (config.healthProbe?.enabled === true) {
+    const intervalMs = config.healthProbe.intervalMs || 5 * 60 * 1000;
+    lines.push(`    ⚠ 启用后会每 ${Math.floor(intervalMs / 1000)} 秒真实调用模型，可能产生额外用量/费用。`);
+  }
   lines.push(`  粘性模式: ${config.sticky !== false ? "启用" : "禁用"}`);
   lines.push("");
   lines.push("【智能默认值】（可手动编辑配置文件修改）");
@@ -2278,7 +2308,8 @@ let routerHandlerRef: ((args: string, ctx: any) => Promise<void>) | null = null;
  * Main extension export
  *
  * Performance optimization: Lazy load models.json only when needed
- * Auto-sync check is deferred to first use or background (30s after startup)
+ * Auto-sync check is enabled by default and deferred to first use or background (30s after startup).
+ * It only checks local models.json/auth.json changes; health probes are controlled by healthProbe.enabled.
  */
 export default function (pi: ExtensionAPI) {
   const config = setCurrentRouterConfig(loadConfig());
@@ -2339,8 +2370,9 @@ export default function (pi: ExtensionAPI) {
   // Register router provider with mirror entries
   registerRouterProvider(pi, config, currentModels);
   
-  // Defer health probes to avoid blocking startup
-  if (config.healthProbe?.enabled) {
+  // Defer health probes to avoid blocking startup. This is opt-in because
+  // probes send real model requests and may create extra usage/costs.
+  if (config.healthProbe?.enabled === true) {
     // Start probes after a short delay to not block initialization
     setTimeout(() => {
       startHealthProbes(config);
@@ -2363,7 +2395,9 @@ export default function (pi: ExtensionAPI) {
   // Remember the active UI context so routing code can update the footer during
   // the same turn, not only at the next turn_start.
   pi.on("session_start", async (_event, ctx) => {
+    const currentConfig = refreshConfigFromDisk(config);
     updateFooterContext(ctx);
+    maybeNotifyHealthProbeCost(ctx, currentConfig);
     applyFooterStatus();
   });
 
@@ -2457,8 +2491,9 @@ export default function (pi: ExtensionAPI) {
   
   debugLog("[pi-router] /router command registered");
 
-  // Background auto-sync check (30s after startup as fallback)
-  // This ensures we catch changes even if user doesn't use router immediately
+  // Background auto-sync check (30s after startup as fallback).
+  // This only checks local models.json/auth.json changes. It does not probe
+  // model providers; real health checks are controlled solely by healthProbe.enabled.
   setTimeout(() => {
     checkAutoSyncOnce();
   }, 30000);
@@ -2662,13 +2697,14 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
   } else if (subcommand === "probes") {
     // Show health probe results
     if (!healthProber.enabled) {
-      ctx.ui.notify("Health probes are disabled.\n\nTo enable, add to config:\n{\n  \"healthProbe\": {\n    \"enabled\": true\n  }\n}", "info");
+      ctx.ui.notify("Health probes are disabled (safe default).\n\nIf you enable them, pi-router will periodically send real requests to configured models and may incur extra usage/costs.\n\nTo enable, add to config:\n{\n  \"healthProbe\": {\n    \"enabled\": true,\n    \"intervalMs\": 600000\n  }\n}", "info");
       return;
     }
     
     const probes = getHealthProbeResults();
     const lines: string[] = [
       `Background Health Probes (interval: ${Math.floor(healthProber.intervalMs / 1000)}s):`,
+      "Note: probes are real model requests and may create extra usage/costs.",
       ""
     ];
     
@@ -5426,7 +5462,7 @@ const healthProber = {
  * Start background health probes for all channels
  */
 function startHealthProbes(config: RouterConfig): void {
-  if (!config.healthProbe?.enabled) {
+  if (config.healthProbe?.enabled !== true) {
     debugLog("[pi-router] Health probes disabled");
     return;
   }
@@ -5650,6 +5686,7 @@ function __testResetInternalState(): void {
   healthProber.initialTimers.clear();
   healthProber.lastProbe.clear();
   healthProber.enabled = false;
+  healthProbeCostWarningShown = false;
   decisionLogger.decisions.length = 0;
   fileHashCache.clear();
   providerIdsCache = null;
@@ -5692,6 +5729,7 @@ function __testSetPiConfigDir(configDir: string | null): void {
   routerState.routeListeners.clear();
   routerState.unregisterRoutingAdapter?.();
   routerState.unregisterRoutingAdapter = undefined;
+  healthProbeCostWarningShown = false;
   autoSyncChecked = false;
   autoSyncConfig = null;
 }

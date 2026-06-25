@@ -14,8 +14,8 @@
     "cooldownMs": 60000
   },
   "healthProbe": {
-    "enabled": true,
-    "intervalMs": 300000,
+    "enabled": false,
+    "intervalMs": 600000,
     "timeoutMs": 10000,
     "probeMessage": "ping"
   },

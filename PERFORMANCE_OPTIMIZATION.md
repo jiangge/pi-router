@@ -136,7 +136,7 @@ startHealthProbes(config);
 **优化后：**
 ```typescript
 // 延迟启动，避免阻塞初始化
-if (config.healthProbe?.enabled) {
+if (config.healthProbe?.enabled === true) {
   setTimeout(() => {
     startHealthProbes(config);
   }, 1000);
@@ -176,7 +176,7 @@ if (config.healthProbe?.enabled) {
 ```json
 {
   "strategy": "channelFirst",
-  "autoSync": false,
+  "autoSync": true,
   "healthProbe": {
     "enabled": false
   },
@@ -193,7 +193,8 @@ if (config.healthProbe?.enabled) {
 
 ### 3. 健康探测配置
 
-如果启用健康探测，建议：
+健康探测默认关闭。如果启用健康探测，请注意它会周期性向真实模型发送探测消息，可能产生额外用量/费用。建议：
+- 明确确认预算后再启用
 - 增加探测间隔 (`intervalMs: 10 * 60 * 1000` = 10分钟)
 - 探测会自动延迟 1 秒启动，不影响初始化
 

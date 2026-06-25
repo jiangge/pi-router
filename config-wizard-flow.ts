@@ -494,19 +494,19 @@ async function runStep3AutoSync(ctx: any): Promise<boolean | undefined> {
     {
       value: "true",
       label: "Enable (Recommended)",
-      description: "Auto-discover new models and channels"
+      description: "Check local models.json/auth.json changes; does not run health probes"
     },
     {
       value: "false",
       label: "Disable",
-      description: "Manually manage configuration, faster startup"
+      description: "Manually run /router sync when you want to update"
     }
   ];
 
   const result = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: any) => {
     const { container, selectList } = createStepComponent(
       3, 6,
-      "Enable Auto-sync?",
+      "Enable Auto-sync? (default: enabled; no health probes)",
       items,
       theme,
       (value) => done(value),
@@ -535,21 +535,21 @@ async function runStep4HealthProbe(ctx: any): Promise<{
 } | null> {
   const items: SelectItem[] = [
     {
-      value: "10min",
-      label: "Enable (10 min interval, Recommended)",
-      description: "Periodically check channel availability"
+      value: "disabled",
+      label: "Disable (Recommended)",
+      description: "Safe default; no background model calls or extra costs"
     },
     {
-      value: "disabled",
-      label: "Disable",
-      description: "Faster startup, passive failure detection"
+      value: "10min",
+      label: "Enable (10 min interval)",
+      description: "Sends real probe requests to models periodically; may cost money"
     }
   ];
 
   const result = await ctx.ui.custom((tui: any, theme: any, _kb: any, done: any) => {
     const { container, selectList } = createStepComponent(
       4, 6,
-      "Enable Health Probe?",
+      "Enable Health Probe? (real model calls; default: disabled)",
       items,
       theme,
       (value) => done(value),
@@ -686,7 +686,7 @@ function showCompletionMessage(ctx: any, config: RouterConfig): void {
     `  • Routing strategy: ${config.strategy}\n` +
     `  • Sorting strategy: ${config.sortBy}\n` +
     `  • Auto-sync: ${config.autoSync ? "Enabled" : "Disabled"}\n` +
-    `  • Health probe: ${config.healthProbe?.enabled ? "Enabled" : "Disabled"}\n` +
+    `  • Health probe: ${config.healthProbe?.enabled ? "Enabled (real periodic model calls; may cost money)" : "Disabled"}\n` +
     `  • Sticky mode: ${config.sticky ? "Enabled" : "Disabled"}\n\n` +
     `Found ${config.models?.length || 0} multi-channel models\n` +
     "Configuration saved\n\n" +

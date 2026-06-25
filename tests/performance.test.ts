@@ -370,6 +370,16 @@ describe('Performance Optimizations', () => {
     expect(__testGetHealthProbeTimerKeys()).toEqual(['m1@ok']);
   });
 
+  it('defaults auto-sync on but health probes off when loading user config', () => {
+    const configPath = path.join(testDir, 'pi-router.json');
+    fs.writeFileSync(configPath, JSON.stringify({ strategy: 'channelFirst', models: [{ id: 'm1', channels: ['a'] }] }), 'utf-8');
+
+    const config = __testLoadConfig();
+    expect(config.models?.[0]?.channels).toEqual(['a']);
+    expect(config.autoSync).toBe(true);
+    expect(config.healthProbe?.enabled).not.toBe(true);
+  });
+
   it('refreshes router config from disk into the active config reference', () => {
     const configPath = path.join(testDir, 'pi-router.json');
     fs.writeFileSync(configPath, JSON.stringify({ strategy: 'channelFirst', models: [{ id: 'm1', channels: ['a'] }] }), 'utf-8');
@@ -404,6 +414,8 @@ describe('Performance Optimizations', () => {
     const saved = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
     expect(saved.auto).toBe(false);
+    expect(saved.autoSync).toBe(true);
+    expect(saved.healthProbe).toEqual({ enabled: false });
     expect(saved.request).toEqual(config.request);
     expect(saved.footer).toEqual(config.footer);
     expect(saved.stickyRecords).toEqual(config.stickyRecords);

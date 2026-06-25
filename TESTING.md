@@ -160,6 +160,8 @@ See `examples/router.config.json` for all available options.
 
 ### Scenario 6: Health Probes
 
+Health probes are disabled by default. This scenario intentionally enables them; each probe sends a real request to configured models and may create extra usage/costs.
+
 **Setup:**
 ```json
 {
@@ -176,7 +178,8 @@ See `examples/router.config.json` for all available options.
 ```
 
 **Test:**
-1. Start pi and wait 60 seconds
+1. Confirm you accept the extra real model calls/costs
+2. Start pi and wait 60 seconds
 2. Check probes: `/router probes`
 3. Disable a channel temporarily
 4. Wait another 60 seconds
@@ -221,6 +224,8 @@ See `examples/router.config.json` for all available options.
   "autoSync": true
 }
 ```
+
+Auto-sync is enabled by default. It only checks local `models.json`/`auth.json` changes and does not run health probes; health checks are controlled by `healthProbe.enabled`.
 
 **Test:**
 1. Start pi with empty models array

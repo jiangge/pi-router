@@ -147,7 +147,7 @@ describe('config order adjustment helpers', () => {
       [key.down, key.enter],
       [key.down, key.down, key.down, key.enter],
       [key.enter],
-      [key.down, key.enter],
+      [key.enter],
       [key.enter],
       [key.down, key.enter, key.up, key.enter, 'c'],
     ]);

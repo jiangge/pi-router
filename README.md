@@ -60,8 +60,8 @@ The wizard walks through:
 
 1. Routing strategy (`channelFirst` / `custom`)
 2. Sort strategy (`latency` / `capabilityFirst` / `cost` / `manual`)
-3. Auto-sync (`enable` / `disable`)
-4. Health probe (`10 minutes` / `disabled`)
+3. Auto-sync (`enable` recommended / `disable`)
+4. Health probe (`disabled` recommended / `10 minutes`)
 5. Sticky mode (`enable` / `disable`)
 6. Optional channel order adjustment
 
@@ -310,13 +310,18 @@ When switching models:
     "cooldownMs": 60000
   },
   "healthProbe": {
-    "enabled": true,
+    "enabled": false,
     "intervalMs": 600000,
     "timeoutMs": 10000,
     "probeMessage": "ping"
   }
 }
 ```
+
+Background feature defaults:
+
+- `autoSync` defaults to `true`. It only checks local `models.json`/`auth.json` changes and prompts you to sync; it does not run health probes or call model providers.
+- `healthProbe.enabled` defaults to `false` and is the only switch for background health checks. If set to `true`, pi-router periodically sends the configured `probeMessage` to real upstream models (for example every `intervalMs` milliseconds). These are real API calls and may create extra usage/costs.
 
 Footer defaults:
 
