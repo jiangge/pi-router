@@ -572,7 +572,7 @@ async function runStep4HealthProbe(ctx: any): Promise<{
       enabled: true,
       intervalMs: 600000, // 10 minutes
       timeoutMs: 10000,
-      probeMessage: "ping"
+      probeMessage: "Red, green, yellow — just tell me which color you like best."
     };
   }
 }

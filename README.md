@@ -313,7 +313,7 @@ When switching models:
     "enabled": false,
     "intervalMs": 600000,
     "timeoutMs": 10000,
-    "probeMessage": "ping"
+    "probeMessage": "Red, green, yellow — just tell me which color you like best."
   }
 }
 ```
@@ -322,6 +322,7 @@ Background feature defaults:
 
 - `autoSync` defaults to `true`. It only checks local `models.json`/`auth.json` changes and prompts you to sync; it does not run health probes or call model providers.
 - `healthProbe.enabled` defaults to `false` and is the only switch for background health checks. If set to `true`, pi-router periodically sends the configured `probeMessage` to real upstream models (for example every `intervalMs` milliseconds). These are real API calls and may create extra usage/costs.
+- `healthProbe.probeMessage` must be longer than 10 characters. Some third-party channels reject very short messages (e.g. `"ping"`) as liveness probes. If your configured value is missing or too short, pi-router falls back to a safe default automatically.
 
 Footer defaults:
 

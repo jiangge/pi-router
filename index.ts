@@ -1379,7 +1379,7 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
     _comment_autoSync: "自动同步(默认 true): true=检查 models.json/auth.json 变化并提示同步；false=手动维护 models；不会触发健康探测",
     autoSync: config.autoSync ?? true,
     lastSyncHash: config.lastSyncHash,
-    _comment_healthProbe: "健康探测(默认关闭): enabled=true 时会每 intervalMs 毫秒向真实模型发送 probeMessage，请求会产生额外用量/费用；false=不发起后台模型调用",
+    _comment_healthProbe: "健康探测(默认关闭): enabled=true 时会每 intervalMs 毫秒向真实模型发送 probeMessage(需>10字符，部分第三方渠道禁止短消息测活)，请求会产生额外用量/费用；false=不发起后台模型调用",
     healthProbe: config.healthProbe ?? { enabled: false },
     _comment_sticky: "粘性模式: true=优先复用上次成功通道，提高缓存命中率",
     sticky: config.sticky ?? true,
@@ -5448,11 +5448,15 @@ interface HealthProbeResult {
   timestamp: number;
 }
 
+// Default probe message. Must be >10 characters: some third-party channels
+// reject very short messages (e.g. "ping") as liveness probes.
+const DEFAULT_PROBE_MESSAGE = "Red, green, yellow — just tell me which color you like best.";
+
 const healthProber = {
   enabled: false,
   intervalMs: 5 * 60 * 1000,  // 5 minutes
   timeoutMs: 10 * 1000,       // 10 seconds
-  probeMessage: "ping",
+  probeMessage: DEFAULT_PROBE_MESSAGE,
   timers: new Map<string, NodeJS.Timeout>(),
   initialTimers: new Set<NodeJS.Timeout>(),
   lastProbe: new Map<string, HealthProbeResult>(),
@@ -5470,7 +5474,18 @@ function startHealthProbes(config: RouterConfig): void {
   healthProber.enabled = true;
   healthProber.intervalMs = config.healthProbe.intervalMs || 5 * 60 * 1000;
   healthProber.timeoutMs = config.healthProbe.timeoutMs || 10 * 1000;
-  healthProber.probeMessage = config.healthProbe.probeMessage || "ping";
+  // probeMessage must be >10 characters: some third-party channels reject
+  // short messages (e.g. "ping") as liveness probes. Fall back to the safe
+  // default when the configured value is missing or too short.
+  const configuredProbeMsg = config.healthProbe.probeMessage;
+  if (configuredProbeMsg && configuredProbeMsg.length > 10) {
+    healthProber.probeMessage = configuredProbeMsg;
+  } else {
+    if (configuredProbeMsg) {
+      debugLog(`[pi-router] probeMessage "${configuredProbeMsg}" is <=10 chars; some third-party channels reject short probes. Using default.`);
+    }
+    healthProber.probeMessage = DEFAULT_PROBE_MESSAGE;
+  }
   
   debugLog(`[pi-router] Starting health probes (interval: ${healthProber.intervalMs}ms)`);
   

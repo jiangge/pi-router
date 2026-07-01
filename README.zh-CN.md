@@ -312,7 +312,7 @@ custom:       按 customOrder 中显式配置的 model@channel 顺序尝试
     "enabled": false,
     "intervalMs": 600000,
     "timeoutMs": 10000,
-    "probeMessage": "ping"
+    "probeMessage": "Red, green, yellow — just tell me which color you like best."
   }
 }
 ```
@@ -321,6 +321,7 @@ custom:       按 customOrder 中显式配置的 model@channel 顺序尝试
 
 - `autoSync` 默认为 `true`。它只检查本地 `models.json`/`auth.json` 变化并提示同步；不会执行健康探测，也不会调用模型提供商。
 - `healthProbe.enabled` 默认为 `false`，并且是后台健康检测的唯一开关。如果设为 `true`，pi-router 会按 `intervalMs` 间隔把 `probeMessage` 发送给真实上游模型（例如每 10 分钟一次）。这些是真实 API 调用，可能产生额外用量/费用。
+- `healthProbe.probeMessage` 需大于 10 个字符。部分第三方渠道会拒绝过短消息（如 `"ping"`）作为测活探针。若配置值缺失或过短，pi-router 会自动回退到安全默认值。
 
 Footer 默认行为：
 
