@@ -5,6 +5,17 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-07-01
+
+### Changed
+
+- **Health probe prompt length**: Default `probeMessage` changed from `"ping"` (4
+  chars) to `"Red, green, yellow — just tell me which color you like best."` (52
+  chars). A runtime guard now enforces >10 character minimum — some third-party
+  channels reject very short messages as liveness probes. If the configured value
+  is missing or ≤10 chars, pi-router automatically falls back to the safe
+  default.
+
 ## [0.4.1] - 2026-06-19
 
 ### Added
