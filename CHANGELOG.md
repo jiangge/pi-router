@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-09-05
+
 ### Fixed
 
 - **Default router startup model**: expose configured `router/*` models during startup discovery so `defaultProvider: "router"` and `defaultModel: "auto"` resolve before `session_start`, including provisional mirror metadata for providers whose model catalogs are registered dynamically at runtime.
