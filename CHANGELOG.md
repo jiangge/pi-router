@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Default router startup model**: expose configured `router/*` models during startup discovery so `defaultProvider: "router"` and `defaultModel: "auto"` resolve before `session_start`, while keeping request routing and authentication session-bound. Discovery-only registrations omit the stream handler, preventing late duplicate evaluations from replacing an active session closure without process-global ownership state.
+- **Default router startup model**: expose configured `router/*` models during startup discovery so `defaultProvider: "router"` and `defaultModel: "auto"` resolve before `session_start`, including provisional mirror metadata for providers whose model catalogs are registered dynamically at runtime.
+- **Session lifecycle isolation**: bind provider streams, authentication registries, footer state, route snapshots, listeners, and routing-adapter ownership to the originating extension/session instance. Interleaved shutdown can no longer clear another active session's state.
+- **Duplicate discovery safety**: coordinate startup registration through Pi's runtime-local extension event bus, preventing a late duplicate factory evaluation from replacing either the active stream handler or its model catalog without process-global ownership state.
 
 ### Tests
 
-- Added lifecycle coverage for discovery-only startup registration, late duplicate evaluation, independent `AgentSession` startup, and interleaved session teardown.
+- Added lifecycle coverage for startup registration, runtime-only provider startup, late duplicate catalog protection, authenticated routing after interleaved `AgentSession` teardown, and routing-adapter ownership. Added Pi `0.84.4` `ModelRuntime` integration tests for pre-session model selection and pending provider registration behavior.
 
 ## [0.5.3] - 2026-09-03
 

@@ -66,8 +66,12 @@ export default defineConfig({
   resolve: {
     alias: [
       {
-        find: '@earendil-works/pi-coding-agent',
+        find: /^@earendil-works\/pi-coding-agent$/,
         replacement: path.join(piRoot, 'dist', 'index.js'),
+      },
+      {
+        find: /^@earendil-works\/pi-coding-agent\/(.*)$/,
+        replacement: `${piRoot}/$1`,
       },
       {
         find: '@earendil-works/pi-ai/compat',

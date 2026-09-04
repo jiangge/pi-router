@@ -14,6 +14,7 @@ import type { Model, Api, Context, SimpleStreamOptions, AssistantMessage, Assist
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { fileURLToPath } from "url";
 import { runConfigOrderWizard, runConfigWizard } from "./config-wizard-flow.js";
 import {
@@ -159,6 +160,8 @@ type RouterConfig = {
     maxTokens?: number;
   };
   models?: RouterModelConfig[];
+  /** Optional startup metadata for providers whose catalogs only exist at runtime. */
+  provisionalModels?: Record<string, Partial<PiModel>>;
   /**
    * Legacy/global alias map kept for migration compatibility. Prefer per-model
    * `models[].aliases` so each canonical router model owns its upstream IDs.
@@ -757,7 +760,11 @@ function modelsFromRegistry(modelRegistry: any): PiModel[] | undefined {
 }
 
 function getEffectiveModels(modelRegistry?: any): PiModel[] {
-  return modelsFromRegistry(modelRegistry) || loadModelsJson();
+  const runtimeModels = modelsFromRegistry(modelRegistry);
+  if (!runtimeModels) return loadModelsJson();
+  // Never route a router mirror back through itself. This matters when the
+  // session registry already contains the provisional startup provider.
+  return runtimeModels.filter(model => model.provider !== "router" && model.api !== ROUTER_API);
 }
 
 function filterConfigurableModels(models: PiModel[], allowedProviders: Set<string>): PiModel[] {
@@ -1307,7 +1314,7 @@ function detectModelChanges(config: RouterConfig, currentModels: PiModel[]): Mod
   return diff;
 }
 
-function getSyncModels(modelRegistry = routerState.currentModelRegistry): PiModel[] {
+function getSyncModels(modelRegistry = getRouterState().currentModelRegistry): PiModel[] {
   const explicitModels = loadExplicitModelsJson();
   const { authProviders, modelsProviders } = loadProviderIds(true);
   const configuredProviders = new Set(modelsProviders);
@@ -1374,8 +1381,8 @@ function setCurrentRouterConfig(config: RouterConfig): RouterConfig {
   currentRouterConfig = config;
   autoSyncConfig = config;
   setRouterDebugState(config);
-  routerState.customFooterEnabled = config.footer?.rightAlignRoute !== false;
-  routerState.footerStatusLineEnabled = config.footer?.statusLine !== false;
+  getRouterState().customFooterEnabled = config.footer?.rightAlignRoute !== false;
+  getRouterState().footerStatusLineEnabled = config.footer?.statusLine !== false;
   return config;
 }
 
@@ -1595,18 +1602,18 @@ function matchConfigSubcommand(input: string): string | null {
 /**
  * Show current configuration
  */
-let healthProbeCostWarningShown = false;
+
 
 function maybeNotifyHealthProbeCost(ctx: any, config: RouterConfig): void {
   if (config.healthProbe?.enabled !== true) {
-    healthProbeCostWarningShown = false;
+    getRouterState().healthProbeCostWarningShown = false;
     return;
   }
-  if (healthProbeCostWarningShown || typeof ctx?.ui?.notify !== "function") {
+  if (getRouterState().healthProbeCostWarningShown || typeof ctx?.ui?.notify !== "function") {
     return;
   }
 
-  healthProbeCostWarningShown = true;
+  getRouterState().healthProbeCostWarningShown = true;
   const intervalMs = config.healthProbe.intervalMs || 5 * 60 * 1000;
   const intervalSeconds = Math.floor(intervalMs / 1000);
   ctx.ui.notify(
@@ -1873,7 +1880,7 @@ async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
  * the next user turn.
  */
 function getCurrentSessionHash(): string | undefined {
-  return routerState.currentSessionHash;
+  return getRouterState().currentSessionHash;
 }
 
 function hashRouteSessionId(sessionId: unknown): string | undefined {
@@ -1894,9 +1901,9 @@ function getRouteSnapshotKey(virtualModelId: string, sessionIdHash?: string): st
 }
 
 function publishRouteSnapshot(snapshot: PiRouteSnapshot): void {
-  routerState.activeRouteSnapshots.set(getRouteSnapshotKey(snapshot.virtualModelId, snapshot.sessionIdHash), snapshot);
-  routerState.activeRouteSnapshots.set(getRouteSnapshotKey(snapshot.virtualModelId), snapshot);
-  for (const listener of routerState.routeListeners) {
+  getRouterState().activeRouteSnapshots.set(getRouteSnapshotKey(snapshot.virtualModelId, snapshot.sessionIdHash), snapshot);
+  getRouterState().activeRouteSnapshots.set(getRouteSnapshotKey(snapshot.virtualModelId), snapshot);
+  for (const listener of getRouterState().routeListeners) {
     try {
       listener(snapshot);
     } catch (err) {
@@ -1976,15 +1983,15 @@ function ensureRoutingRegistry(): PiRoutingRegistryV1 {
 
 function resolveActiveRouteSnapshot(virtualModelId: string, hint?: { sessionIdHash?: string; requestId?: string }): PiRouteSnapshot | undefined {
   const sessionIdHash = hint?.sessionIdHash || getCurrentSessionHash();
-  return routerState.activeRouteSnapshots.get(getRouteSnapshotKey(virtualModelId, sessionIdHash))
-    || routerState.activeRouteSnapshots.get(getRouteSnapshotKey(virtualModelId));
+  return getRouterState().activeRouteSnapshots.get(getRouteSnapshotKey(virtualModelId, sessionIdHash))
+    || getRouterState().activeRouteSnapshots.get(getRouteSnapshotKey(virtualModelId));
 }
 
 function resolveCandidateRouteSnapshots(virtualModelId: string): PiRouteSnapshot[] {
   const config = currentRouterConfig;
   if (!config) return [];
 
-  const modelMap = getCachedModelMap(routerState.currentModelRegistry);
+  const modelMap = getCachedModelMap(getRouterState().currentModelRegistry);
   const snapshots: PiRouteSnapshot[] = [];
   const appendSnapshot = (routerModelId: string, modelConfig: RouterModelConfig, routeEntry: RouterRouteEntry) => {
     const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
@@ -2009,17 +2016,23 @@ function resolveCandidateRouteSnapshots(virtualModelId: string): PiRouteSnapshot
   return snapshots;
 }
 
-function registerRoutingAdapter(): void {
-  if (routerState.unregisterRoutingAdapter) return;
+function registerRoutingAdapter(state = getRouterState()): void {
+  if (state.unregisterRoutingAdapter) return;
 
   const registry = ensureRoutingRegistry();
-  routerState.unregisterRoutingAdapter = registry.registerRouter({
+  state.unregisterRoutingAdapter = registry.registerRouter({
     virtualProvider: "router",
-    resolveActiveRoute: resolveActiveRouteSnapshot,
-    resolveCandidateRoutes: resolveCandidateRouteSnapshots,
+    resolveActiveRoute: (virtualModelId, hint) => routerStateStorage.run(
+      state,
+      () => resolveActiveRouteSnapshot(virtualModelId, hint),
+    ),
+    resolveCandidateRoutes: (virtualModelId) => routerStateStorage.run(
+      state,
+      () => resolveCandidateRouteSnapshots(virtualModelId),
+    ),
     subscribe(listener) {
-      routerState.routeListeners.add(listener);
-      return () => routerState.routeListeners.delete(listener);
+      state.routeListeners.add(listener);
+      return () => state.routeListeners.delete(listener);
     },
   });
 }
@@ -2042,7 +2055,7 @@ function applyCacheHintsToRequest(
   virtualModelId?: string
 ): { context: Context; options: SimpleStreamOptions | undefined } {
   const sessionIdHash = getCurrentSessionHash();
-  const resolvedVirtualModelId = virtualModelId || (routerState.currentModelProvider === "router" ? routerState.currentModel?.id : undefined);
+  const resolvedVirtualModelId = virtualModelId || (getRouterState().currentModelProvider === "router" ? getRouterState().currentModel?.id : undefined);
   const baseHintInput = {
     sessionIdHash,
     sessionId: sessionIdHash,
@@ -2089,7 +2102,7 @@ function updateFooterStatus(
   error?: string,
   api?: string
 ): void {
-  routerState.lastStatusUpdate = {
+  getRouterState().lastStatusUpdate = {
     modelId,
     channel,
     actualModelId,
@@ -2158,10 +2171,10 @@ function sanitizeFooterStatusText(text: string): string {
 }
 
 function formatStatsLine(theme: any, width: number): string {
-  const sessionManager = routerState.currentSessionManager;
-  const model = routerState.currentModel;
-  const getContextUsage = routerState.currentGetContextUsage;
-  const modelRegistry = routerState.currentModelRegistry;
+  const sessionManager = getRouterState().currentSessionManager;
+  const model = getRouterState().currentModel;
+  const getContextUsage = getRouterState().currentGetContextUsage;
+  const modelRegistry = getRouterState().currentModelRegistry;
 
   let totalInput = 0;
   let totalOutput = 0;
@@ -2261,7 +2274,7 @@ function createRouterFooterComponent(_tui: any, theme: any, footerData: any) {
     },
     invalidate() {},
     render(width: number): string[] {
-      const sessionManager = routerState.currentSessionManager;
+      const sessionManager = getRouterState().currentSessionManager;
       let pwd = formatCwdForRouterFooter(sessionManager?.getCwd?.() ?? process.cwd(), process.env.HOME || process.env.USERPROFILE);
       const branch = footerData?.getGitBranch?.();
       if (branch) pwd = `${pwd} (${branch})`;
@@ -2269,15 +2282,15 @@ function createRouterFooterComponent(_tui: any, theme: any, footerData: any) {
       if (sessionName) pwd = `${pwd} • ${sessionName}`;
 
       const statsLeft = formatStatsLine(theme, width);
-      const status = routerState.lastStatusUpdate;
-      const model = routerState.currentModel;
-      const routeStatus = status && routerState.currentModelProvider === "router"
+      const status = getRouterState().lastStatusUpdate;
+      const model = getRouterState().currentModel;
+      const routeStatus = status && getRouterState().currentModelProvider === "router"
         ? formatRouteStatus(theme, status)
         : "";
 
       let modelText = model?.id || "no-model";
       if (model?.reasoning) {
-        const thinkingLevel = routerState.currentThinkingLevel || "off";
+        const thinkingLevel = getRouterState().currentThinkingLevel || "off";
         modelText = thinkingLevel === "off" ? `${modelText} • thinking off` : `${modelText} • ${thinkingLevel}`;
       }
       const modelPrefix = model?.provider ? `(${model.provider}) ${modelText}` : modelText;
@@ -2329,47 +2342,47 @@ function createRouterFooterComponent(_tui: any, theme: any, footerData: any) {
 }
 
 function refreshFooterContext(ctx: any, thinkingLevel?: string): void {
-  routerState.currentUi = ctx.ui;
-  routerState.currentTheme = ctx.ui?.theme;
-  routerState.currentModel = ctx.model;
-  routerState.currentModelProvider = ctx.model?.provider;
-  routerState.currentThinkingLevel = thinkingLevel;
+  getRouterState().currentUi = ctx.ui;
+  getRouterState().currentTheme = ctx.ui?.theme;
+  getRouterState().currentModel = ctx.model;
+  getRouterState().currentModelProvider = ctx.model?.provider;
+  getRouterState().currentThinkingLevel = thinkingLevel;
   // Footer-driving events may carry only part of the live session context.
   // Update each optional session field only when present so a partial context
   // cannot erase the authenticated registry captured by session_start.
   if (ctx.sessionManager) {
-    routerState.currentSessionManager = ctx.sessionManager;
-    routerState.currentSessionHash = getSessionHashFromManager(ctx.sessionManager);
+    getRouterState().currentSessionManager = ctx.sessionManager;
+    getRouterState().currentSessionHash = getSessionHashFromManager(ctx.sessionManager);
   }
   if (typeof ctx.getContextUsage === "function") {
-    routerState.currentGetContextUsage = () => ctx.getContextUsage();
+    getRouterState().currentGetContextUsage = () => ctx.getContextUsage();
   }
   if (ctx.modelRegistry) {
-    routerState.currentModelRegistry = ctx.modelRegistry;
+    getRouterState().currentModelRegistry = ctx.modelRegistry;
   }
 }
 
 function ensureRouterFooterInstalled(): void {
-  const ui = routerState.currentUi;
-  if (!ui?.setFooter || routerState.customFooterInstalled || !routerState.customFooterEnabled) {
+  const ui = getRouterState().currentUi;
+  if (!ui?.setFooter || getRouterState().customFooterInstalled || !getRouterState().customFooterEnabled) {
     return;
   }
 
   ui.setFooter(createRouterFooterComponent);
-  routerState.customFooterInstalled = true;
+  getRouterState().customFooterInstalled = true;
   debugLog("[pi-router] ensureRouterFooterInstalled: custom footer installed");
   ui.setStatus?.("pi-router", undefined);
   ui.setStatus?.("pi-router-right", undefined);
 }
 
 function restoreDefaultFooter(): void {
-  const ui = routerState.currentUi;
-  if (!ui?.setFooter || !routerState.customFooterInstalled) {
+  const ui = getRouterState().currentUi;
+  if (!ui?.setFooter || !getRouterState().customFooterInstalled) {
     return;
   }
 
   ui.setFooter(undefined);
-  routerState.customFooterInstalled = false;
+  getRouterState().customFooterInstalled = false;
   ui.setStatus?.("pi-router-right", undefined);
 }
 
@@ -2384,11 +2397,11 @@ function logFooterDecision(decision: string): void {
 }
 
 function applyFooterStatus(): void {
-  const status = routerState.lastStatusUpdate;
-  const ui = routerState.currentUi;
+  const status = getRouterState().lastStatusUpdate;
+  const ui = getRouterState().currentUi;
 
-  if (!ui || !status || routerState.currentModelProvider !== "router") {
-    logFooterDecision(`applyFooterStatus: hide (ui=${ui ? "yes" : "no"}, status=${status ? status.phase : "none"}, provider=${routerState.currentModelProvider ?? "(none)"})`);
+  if (!ui || !status || getRouterState().currentModelProvider !== "router") {
+    logFooterDecision(`applyFooterStatus: hide (ui=${ui ? "yes" : "no"}, status=${status ? status.phase : "none"}, provider=${getRouterState().currentModelProvider ?? "(none)"})`);
     restoreDefaultFooter();
     ui?.setStatus?.("pi-router", undefined);
     ui?.setStatus?.("pi-router-right", undefined);
@@ -2403,20 +2416,20 @@ function applyFooterStatus(): void {
   ensureRouterFooterInstalled();
   logFooterDecision(`applyFooterStatus: show (${status.phase} -> ${status.channel})`);
 
-  if (routerState.customFooterInstalled) {
+  if (getRouterState().customFooterInstalled) {
     ui.setStatus?.("pi-router", undefined);
-    ui.setStatus?.("pi-router-right", status ? formatFooterStatus(routerState.currentTheme, status) : undefined);
+    ui.setStatus?.("pi-router-right", status ? formatFooterStatus(getRouterState().currentTheme, status) : undefined);
     return;
   }
 
-  if (routerState.footerStatusLineEnabled === false) {
+  if (getRouterState().footerStatusLineEnabled === false) {
     ui.setStatus?.("pi-router", undefined);
     ui.setStatus?.("pi-router-right", undefined);
     return;
   }
 
   if (ui.setStatus) {
-    ui.setStatus("pi-router", formatFooterStatus(routerState.currentTheme, status));
+    ui.setStatus("pi-router", formatFooterStatus(getRouterState().currentTheme, status));
     ui.setStatus("pi-router-right", undefined);
   }
 }
@@ -2434,8 +2447,30 @@ let routerHandlerRef: ((args: string, ctx: any) => Promise<void>) | null = null;
  * It only checks local models.json/auth.json changes; health probes are controlled by healthProbe.enabled.
  */
 export default function (pi: ExtensionAPI) {
+  const sessionState = createRouterState();
+  return routerStateStorage.run(sessionState, () => initializeRouterExtension(pi, sessionState));
+}
+
+function initializeRouterExtension(pi: ExtensionAPI, sessionState: RouterState) {
+  const runWithSessionState = <T>(fn: () => T): T => routerStateStorage.run(sessionState, fn);
+  const on = (event: string, handler: (event: any, ctx: any) => Promise<void>) => {
+    pi.on(event as any, (eventData: any, ctx: any) => runWithSessionState(() => handler(eventData, ctx)));
+  };
   const config = setCurrentRouterConfig(loadConfig());
   configFileMtimeMs = getFileMtimeMs(getRouterConfigPath());
+
+  // Coordinate duplicate evaluations inside this ExtensionRuntime without
+  // process-global ownership. The first (active) instance consumes later
+  // bootstrap proposals, so a discovery-only registration cannot replace its
+  // request handler or catalog. A fresh runtime has a fresh event bus.
+  let startupProviderRegistered = false;
+  pi.events?.on?.("pi-router:startup-provider", (proposal: { claimed?: boolean; register?: () => void }) => {
+    if (proposal?.claimed) return;
+    proposal.claimed = true;
+    if (startupProviderRegistered || typeof proposal.register !== "function") return;
+    startupProviderRegistered = true;
+    proposal.register();
+  });
 
   // Check if we have configured models
   const hasConfiguredModels = config.models && config.models.length > 0;
@@ -2487,7 +2522,7 @@ export default function (pi: ExtensionAPI) {
     if (!currentModels) {
       currentModels = loadModelsJson();
     }
-    registerRouterProvider(pi, config, currentModels, { discoveryOnly: true });
+    registerRouterProvider(pi, config, currentModels, { discoveryOnly: true, state: sessionState, allowProvisional: true });
   } else {
     debugLog("[pi-router] No models configured yet. Waiting for session_start auto-discovery or configuration.");
   }
@@ -2497,7 +2532,7 @@ export default function (pi: ExtensionAPI) {
   // listing), so starting timers in the factory would leak process resources.
   let autoSyncTimer: NodeJS.Timeout | undefined;
   let healthProbeStartupTimer: NodeJS.Timeout | undefined;
-  const clearSessionResources = () => {
+  const clearSessionResources = () => runWithSessionState(() => {
     if (autoSyncTimer) {
       clearTimeout(autoSyncTimer);
       autoSyncTimer = undefined;
@@ -2506,31 +2541,31 @@ export default function (pi: ExtensionAPI) {
       clearTimeout(healthProbeStartupTimer);
       healthProbeStartupTimer = undefined;
     }
-    if (stickyPersistTimer) {
-      clearTimeout(stickyPersistTimer);
-      stickyPersistTimer = null;
+    if (getRouterState().stickyPersistTimer) {
+      clearTimeout(getRouterState().stickyPersistTimer);
+      getRouterState().stickyPersistTimer = null;
     }
     stopHealthProbes();
-  };
-  const scheduleSessionResources = (currentConfig: RouterConfig) => {
+  });
+  const scheduleSessionResources = (currentConfig: RouterConfig) => runWithSessionState(() => {
     clearSessionResources();
     autoSyncChecked = false;
 
     // This only checks local models.json/auth.json changes. It never calls a
     // provider; real health requests are controlled by healthProbe.enabled.
-    autoSyncTimer = setTimeout(() => {
+    autoSyncTimer = setTimeout(() => runWithSessionState(() => {
       autoSyncTimer = undefined;
       checkAutoSyncOnce();
-    }, 30000);
+    }), 30000);
 
     if (currentConfig.healthProbe?.enabled === true) {
       // Delay probes until the session context and model registry are ready.
-      healthProbeStartupTimer = setTimeout(() => {
+      healthProbeStartupTimer = setTimeout(() => runWithSessionState(() => {
         healthProbeStartupTimer = undefined;
         startHealthProbes(currentConfig);
-      }, 1000);
+      }), 1000);
     }
-  };
+  });
   debugLog(`[pi-router] Extension loaded (v${resolveRouterVersion()})`);
   debugLog("[pi-router] Strategy:", config.strategy ?? "channelFirst");
   debugLog("[pi-router] Configured models:", config.models?.length ?? 0);
@@ -2538,24 +2573,26 @@ export default function (pi: ExtensionAPI) {
   // By default pi-router owns the footer replacement when router status is
   // active. Users can opt out with footer.rightAlignRoute = false if another
   // extension should keep the built-in footer layout.
-  routerState.customFooterEnabled = config.footer?.rightAlignRoute !== false;
-  routerState.footerStatusLineEnabled = config.footer?.statusLine !== false;
+  getRouterState().customFooterEnabled = config.footer?.rightAlignRoute !== false;
+  getRouterState().footerStatusLineEnabled = config.footer?.statusLine !== false;
   const updateFooterContext = (ctx: any) => {
     refreshFooterContext(ctx, typeof pi.getThinkingLevel === "function" ? pi.getThinkingLevel() : undefined);
   };
 
   // Remember the active UI context so routing code can update the footer during
   // the same turn, not only at the next turn_start.
-  pi.on("session_start", async (_event, ctx) => {
+  on("session_start", async (_event, ctx) => {
     debugLog(`[pi-router] session_start received (modelRegistry=${ctx?.modelRegistry ? "present" : "missing"})`);
     let currentConfig = refreshConfigFromDisk(config);
+    fallbackRouterState = sessionState;
     updateFooterContext(ctx);
-    registerRoutingAdapter();
+    registerRoutingAdapter(sessionState);
 
     // Provider registrations outlive an ExtensionRunner in pi's ModelRuntime.
     // Remove any bootstrap or stale registration before binding this module
     // instance, so its streamSimple closure and lifecycle handlers cannot split
     // across different extension instances after /reload.
+    startupProviderRegistered = true;
     pi.unregisterProvider("router");
 
     // Pi 0.83 may add models through provider-owned dynamic catalogs or other
@@ -2588,7 +2625,7 @@ export default function (pi: ExtensionAPI) {
         ? registryModels
         : (currentModels || loadModelsJson());
       currentModels = modelsForRegistration;
-      registerRouterProvider(pi, currentConfig, modelsForRegistration);
+      registerRouterProvider(pi, currentConfig, modelsForRegistration, { state: sessionState, allowProvisional: true });
     }
 
     scheduleSessionResources(currentConfig);
@@ -2596,46 +2633,46 @@ export default function (pi: ExtensionAPI) {
     applyFooterStatus();
   });
 
-  pi.on("session_shutdown", async () => {
+  on("session_shutdown", async () => {
     clearSessionResources();
     restoreDefaultFooter();
     pi.unregisterProvider("router");
-    routerState.unregisterRoutingAdapter?.();
-    routerState.unregisterRoutingAdapter = undefined;
-    routerState.routeListeners.clear();
-    routerState.activeRouteSnapshots.clear();
-    routerState.currentUi = undefined;
-    routerState.currentTheme = undefined;
-    routerState.currentModel = undefined;
-    routerState.currentModelProvider = undefined;
-    routerState.currentThinkingLevel = undefined;
-    routerState.currentSessionManager = undefined;
-    routerState.currentSessionHash = undefined;
-    routerState.currentRouterModelId = undefined;
-    routerState.currentGetContextUsage = undefined;
-    routerState.currentModelRegistry = undefined;
+    getRouterState().unregisterRoutingAdapter?.();
+    getRouterState().unregisterRoutingAdapter = undefined;
+    getRouterState().routeListeners.clear();
+    getRouterState().activeRouteSnapshots.clear();
+    getRouterState().currentUi = undefined;
+    getRouterState().currentTheme = undefined;
+    getRouterState().currentModel = undefined;
+    getRouterState().currentModelProvider = undefined;
+    getRouterState().currentThinkingLevel = undefined;
+    getRouterState().currentSessionManager = undefined;
+    getRouterState().currentSessionHash = undefined;
+    getRouterState().currentRouterModelId = undefined;
+    getRouterState().currentGetContextUsage = undefined;
+    getRouterState().currentModelRegistry = undefined;
   });
 
-  pi.on("turn_start", async (_event, ctx) => {
+  on("turn_start", async (_event, ctx) => {
     updateFooterContext(ctx);
     applyFooterStatus();
   });
 
-  pi.on("message_update", async (_event, ctx) => {
+  on("message_update", async (_event, ctx) => {
     updateFooterContext(ctx);
     applyFooterStatus();
   });
 
-  pi.on("thinking_level_select", async (event, ctx) => {
+  on("thinking_level_select", async (event, ctx) => {
     refreshFooterContext(ctx, event.level);
     applyFooterStatus();
   });
   
   // Clear status when switching away from router models
-  pi.on("model_select", async (event, ctx) => {
+  on("model_select", async (event, ctx) => {
     updateFooterContext(ctx);
-    routerState.currentModel = event.model;
-    routerState.currentModelProvider = event.model.provider;
+    getRouterState().currentModel = event.model;
+    getRouterState().currentModelProvider = event.model.provider;
     if (event.model.provider !== "router") {
       restoreDefaultFooter();
       ctx.ui.setStatus("pi-router", undefined);
@@ -2648,7 +2685,7 @@ export default function (pi: ExtensionAPI) {
   // Register /router command
   pi.registerCommand("router", {
     description: "pi-router operations (config, status, list, explain, decisions, probes, pricing, sync, diff, sticky, reset, debug-footer)",
-    getArgumentCompletions: (prefix: string) => {
+    getArgumentCompletions: (prefix: string) => runWithSessionState(() => {
       // Handle trailing space: user typed "config " then hit tab
       const hasTrailingSpace = prefix.endsWith(' ');
       const parts = prefix.trim().split(/\s+/).filter(Boolean);
@@ -2708,10 +2745,10 @@ export default function (pi: ExtensionAPI) {
       }
       
       return null;
-    },
-    handler: async (args: string, ctx: any) => {
+    }),
+    handler: async (args: string, ctx: any) => runWithSessionState(async () => {
       await routerHandler(args, ctx);
-    },
+    }),
   });
   
   // Store handler reference for menu re-dispatch
@@ -2810,10 +2847,10 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     
     // Active channels
     lines.push("Active Channels:");
-    if (routerState.activeChannels.size === 0) {
+    if (getRouterState().activeChannels.size === 0) {
       lines.push("  (none)");
     } else {
-      for (const [modelId, channel] of routerState.activeChannels.entries()) {
+      for (const [modelId, channel] of getRouterState().activeChannels.entries()) {
         lines.push(`  ${modelId} \u2192 ${channel}`);
       }
     }
@@ -2823,7 +2860,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     lines.push("Active Cooldowns:");
     const now = Date.now();
     let cooldownCount = 0;
-    for (const [key, endTime] of routerState.cooldowns.entries()) {
+    for (const [key, endTime] of getRouterState().cooldowns.entries()) {
       if (endTime > now) {
         const remainingMs = endTime - now;
         lines.push(`  ${key}: ${Math.ceil(remainingMs / 1000)}s remaining`);
@@ -2838,7 +2875,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     // Recent failures
     lines.push("Recent Failures (last 10):");
     let totalFailures = 0;
-    for (const [modelId, failures] of routerState.lastFailures.entries()) {
+    for (const [modelId, failures] of getRouterState().lastFailures.entries()) {
       const recent = failures.slice(-10);
       totalFailures += recent.length;
       recent.forEach(f => {
@@ -2854,7 +2891,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     // Latency stats
     lines.push("Channel Latency (avg last 10):");
     let latencyCount = 0;
-    for (const [key, records] of latencyTracker.records.entries()) {
+    for (const [key, records] of getLatencyTracker().records.entries()) {
       if (records.length > 0) {
         const avg = records.reduce((sum, r) => sum + r.latencyMs, 0) / records.length;
         lines.push(`  ${key}: ${avg.toFixed(0)}ms (${records.length} samples)`);
@@ -2869,7 +2906,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     // Health status
     lines.push("Channel Health:");
     let healthCount = 0;
-    for (const [key, status] of healthChecker.status.entries()) {
+    for (const [key, status] of getHealthChecker().status.entries()) {
       const statusStr = status.healthy ? "healthy" : "unhealthy";
       const failStr = status.consecutiveFailures > 0 ? ` (${status.consecutiveFailures} failures)` : "";
       const ago = Math.floor((now - status.lastCheck) / 1000);
@@ -2884,7 +2921,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     // Circuit breaker status
     lines.push("Circuit Breakers:");
     let circuitCount = 0;
-    for (const [key, status] of circuitBreaker.circuits.entries()) {
+    for (const [key, status] of getCircuitBreaker().circuits.entries()) {
       if (status.state !== "closed") {
         const retryIn = status.nextRetryTime > now ? Math.ceil((status.nextRetryTime - now) / 1000) : 0;
         lines.push(`  ${key}: ${status.state} (${status.failureCount} failures, retry in ${retryIn}s)`);
@@ -2927,14 +2964,14 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     ctx.ui.notify(lines.join("\n"), "info");
   } else if (subcommand === "probes") {
     // Show health probe results
-    if (!healthProber.enabled) {
+    if (!getHealthProber().enabled) {
       ctx.ui.notify("Health probes are disabled (safe default).\n\nIf you enable them, pi-router will periodically send real requests to configured models and may incur extra usage/costs.\n\nTo enable, add to config:\n{\n  \"healthProbe\": {\n    \"enabled\": true,\n    \"intervalMs\": 600000\n  }\n}", "info");
       return;
     }
     
     const probes = getHealthProbeResults();
     const lines: string[] = [
-      `Background Health Probes (interval: ${Math.floor(healthProber.intervalMs / 1000)}s):`,
+      `Background Health Probes (interval: ${Math.floor(getHealthProber().intervalMs / 1000)}s):`,
       "Note: probes are real model requests and may create extra usage/costs.",
       ""
     ];
@@ -3194,7 +3231,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     ctx.ui.notify(lines.join("\n"), "info");
   } else if (subcommand === "debug-footer" || subcommand === "df") {
     // Debug footer display status
-    const status = routerState.lastStatusUpdate;
+    const status = getRouterState().lastStatusUpdate;
     const lines: string[] = ["Footer Debug Information", "━".repeat(40), ""];
 
     // Router state
@@ -3222,14 +3259,14 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
 
     // Extension footer bookkeeping
     lines.push("Footer Bookkeeping:");
-    lines.push(`  customFooterInstalled: ${routerState.customFooterInstalled ? "yes" : "no"}`);
-    lines.push(`  customFooterEnabled: ${routerState.customFooterEnabled ? "yes" : "no"}`);
-    lines.push(`  footerStatusLineEnabled: ${routerState.footerStatusLineEnabled ? "yes" : "no"}`);
-    lines.push(`  currentUi: ${routerState.currentUi ? (typeof routerState.currentUi.setFooter === "function" ? "present (setFooter ok)" : "present (no setFooter)") : "(none)"}`);
-    lines.push(`  currentModelProvider: ${routerState.currentModelProvider || "(none)"}`);
-    lines.push(`  currentSessionManager: ${routerState.currentSessionManager ? "present" : "(none)"}`);
-    lines.push(`  currentGetContextUsage: ${routerState.currentGetContextUsage ? "present" : "(none)"}`);
-    lines.push(`  currentModelRegistry: ${routerState.currentModelRegistry ? "present" : "(none)"}`);
+    lines.push(`  customFooterInstalled: ${getRouterState().customFooterInstalled ? "yes" : "no"}`);
+    lines.push(`  customFooterEnabled: ${getRouterState().customFooterEnabled ? "yes" : "no"}`);
+    lines.push(`  footerStatusLineEnabled: ${getRouterState().footerStatusLineEnabled ? "yes" : "no"}`);
+    lines.push(`  currentUi: ${getRouterState().currentUi ? (typeof getRouterState().currentUi.setFooter === "function" ? "present (setFooter ok)" : "present (no setFooter)") : "(none)"}`);
+    lines.push(`  currentModelProvider: ${getRouterState().currentModelProvider || "(none)"}`);
+    lines.push(`  currentSessionManager: ${getRouterState().currentSessionManager ? "present" : "(none)"}`);
+    lines.push(`  currentGetContextUsage: ${getRouterState().currentGetContextUsage ? "present" : "(none)"}`);
+    lines.push(`  currentModelRegistry: ${getRouterState().currentModelRegistry ? "present" : "(none)"}`);
     lines.push("");
 
     // Expected footer
@@ -3612,15 +3649,55 @@ type RouterState = {
   activeRouteSnapshots: Map<string, PiRouteSnapshot>; // route key -> latest route snapshot
   routeListeners: Set<(event: PiRouteSnapshot) => void>;
   unregisterRoutingAdapter?: () => void;
+  stickyPersistTimer: NodeJS.Timeout | null;
+  healthProbeCostWarningShown: boolean;
+  latencyTracker: LatencyTracker;
+  healthChecker: HealthChecker;
+  circuitBreaker: CircuitBreaker;
+  decisionLogger: DecisionLogger;
+  healthProber: {
+    enabled: boolean;
+    intervalMs: number;
+    timeoutMs: number;
+    probeMessage: string;
+    timers: Map<string, NodeJS.Timeout>;
+    initialTimers: Set<NodeJS.Timeout>;
+    lastProbe: Map<string, HealthProbeResult>;
+  };
 };
 
-const routerState: RouterState = {
-  activeChannels: new Map(),
-  cooldowns: new Map(),
-  lastFailures: new Map(),
-  activeRouteSnapshots: new Map(),
-  routeListeners: new Set(),
-};
+function createRouterState(): RouterState {
+  return {
+    activeChannels: new Map(),
+    cooldowns: new Map(),
+    lastFailures: new Map(),
+    activeRouteSnapshots: new Map(),
+    routeListeners: new Set(),
+    stickyPersistTimer: null,
+    healthProbeCostWarningShown: false,
+    latencyTracker: { records: new Map(), maxRecords: 10 },
+    healthChecker: { status: new Map(), intervalMs: 60000, enabled: false },
+    circuitBreaker: { circuits: new Map(), failureThreshold: 5, resetTimeoutMs: 120000, enabled: true },
+    decisionLogger: { decisions: [], maxDecisions: 50, enabled: true },
+    healthProber: {
+      enabled: false,
+      intervalMs: 5 * 60 * 1000,
+      timeoutMs: 10 * 1000,
+      probeMessage: "Red, green, yellow — just tell me which color you like best.",
+      timers: new Map(),
+      initialTimers: new Set(),
+      lastProbe: new Map(),
+    },
+  };
+}
+
+let fallbackRouterState = createRouterState();
+const routerStateStorage = new AsyncLocalStorage<RouterState>();
+
+function getRouterState(): RouterState {
+  return routerStateStorage.getStore() || fallbackRouterState;
+}
+
 
 // FIX #1, #10: Cache modelMap to avoid rebuilding on every request
 let cachedModelMap: Map<string, PiModel> | null = null;
@@ -3877,11 +3954,42 @@ function createMirrorModels(
 /**
  * Register router provider with mirror entries for configured models
  */
+function createProvisionalMirrorModels(
+  configuredModels: RouterModelConfig[],
+  config: RouterConfig,
+  existingModels: PiModel[],
+): PiModel[] {
+  const existingIds = new Set(existingModels.map(model => model.id));
+  const createProvisional = (id: string, displayName: string): PiModel => {
+    const metadata = config.provisionalModels?.[id] || {};
+    return {
+      id,
+      name: typeof metadata.name === "string" ? metadata.name : displayName,
+      provider: "router",
+      api: ROUTER_API,
+      reasoning: metadata.reasoning === true,
+      input: Array.isArray(metadata.input) && metadata.input.length > 0 ? metadata.input : ["text"],
+      contextWindow: typeof metadata.contextWindow === "number" ? metadata.contextWindow : 128000,
+      maxTokens: typeof metadata.maxTokens === "number" ? metadata.maxTokens : 8192,
+      cost: metadata.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      ...(metadata.compat ? { compat: metadata.compat } : {}),
+      ...(metadata.thinkingLevelMap ? { thinkingLevelMap: metadata.thinkingLevelMap } : {}),
+    } as PiModel;
+  };
+  const provisional = configuredModels
+    .filter(model => !existingIds.has(model.id))
+    .map(model => createProvisional(model.id, `${model.id} (router)`));
+  if (!existingIds.has("auto")) {
+    provisional.unshift(createProvisional("auto", "Auto Router"));
+  }
+  return provisional;
+}
+
 function registerRouterProvider(
   pi: ExtensionAPI,
   config: RouterConfig,
   allModels: PiModel[],
-  options?: { discoveryOnly?: boolean },
+  options?: { discoveryOnly?: boolean; state?: RouterState; allowProvisional?: boolean },
 ): void {
   const configuredModels = config.models || [];
 
@@ -3893,7 +4001,10 @@ function registerRouterProvider(
   // Build a map of all available real models by id@provider.
   const modelMap = buildModelMap(allModels);
 
-  const mirrorModels = createMirrorModels(configuredModels, modelMap);
+  const resolvedMirrorModels = createMirrorModels(configuredModels, modelMap);
+  const mirrorModels = options?.allowProvisional
+    ? [...resolvedMirrorModels, ...createProvisionalMirrorModels(configuredModels, config, resolvedMirrorModels)]
+    : resolvedMirrorModels;
 
   if (mirrorModels.length === 0) {
     console.warn("[pi-router] No valid mirror models created");
@@ -3908,7 +4019,8 @@ function registerRouterProvider(
   };
 
   if (!options?.discoveryOnly) {
-    providerConfig.streamSimple = (model: any, context: any, options?: any) => {
+    const state = options?.state || getRouterState();
+    providerConfig.streamSimple = (model: any, context: any, options?: any) => routerStateStorage.run(state, () => {
       // Get the latest config if it changed on disk.
       const currentConfig = refreshConfigFromDisk();
 
@@ -3921,12 +4033,28 @@ function registerRouterProvider(
         options,
         currentConfig,
         // FIX #1, #10, #15: Use cached modelMap instead of rebuilding on every request
-        getCachedModelMap(routerState.currentModelRegistry),
+        getCachedModelMap(state.currentModelRegistry),
       );
-    };
+    });
   }
 
-  pi.registerProvider("router", providerConfig);
+  if (options?.discoveryOnly) {
+    // A late duplicate factory evaluation must be a no-op once a session-bound
+    // provider exists. Omitting streamSimple is insufficient because Pi still
+    // replaces explicitly supplied model catalogs when providers are merged.
+    const proposal = {
+      claimed: false,
+      register: () => pi.registerProvider("router", providerConfig),
+    };
+    if (pi.events?.emit) {
+      pi.events.emit("pi-router:startup-provider", proposal);
+    } else {
+      // Compatibility for older Pi versions without extension event buses.
+      proposal.register();
+    }
+  } else {
+    pi.registerProvider("router", providerConfig);
+  }
   debugLog(`[pi-router] Registered ${mirrorModels.length} router models${options?.discoveryOnly ? " for startup discovery" : ""}`);
 }
 
@@ -3977,7 +4105,7 @@ function canTryAutoChannel(modelId: string, channel: string, routeKey = channel)
   const key = getRouteStateKey(modelId, routeKey);
   
   // Check cooldown
-  const cooldownEnd = routerState.cooldowns.get(key);
+  const cooldownEnd = getRouterState().cooldowns.get(key);
   if (cooldownEnd && Date.now() < cooldownEnd) {
     return false;
   }
@@ -4085,33 +4213,33 @@ function resetRoutingPointer(
   let activeChannelsCleared = 0;
   let failuresCleared = 0;
   for (const mid of targetModelIds) {
-    if (routerState.activeChannels.delete(mid)) activeChannelsCleared++;
-    const failures = routerState.lastFailures.get(mid);
+    if (getRouterState().activeChannels.delete(mid)) activeChannelsCleared++;
+    const failures = getRouterState().lastFailures.get(mid);
     if (failures && failures.length > 0) {
       failuresCleared += failures.length;
-      routerState.lastFailures.delete(mid);
+      getRouterState().lastFailures.delete(mid);
     }
   }
 
   const prefixMatch = (key: string) => targetModelIds.some(mid => key.startsWith(`${mid}@`));
   let cooldownsCleared = 0;
-  for (const key of Array.from(routerState.cooldowns.keys())) {
+  for (const key of Array.from(getRouterState().cooldowns.keys())) {
     if (prefixMatch(key)) {
-      routerState.cooldowns.delete(key);
+      getRouterState().cooldowns.delete(key);
       cooldownsCleared++;
     }
   }
   let healthReset = 0;
-  for (const key of Array.from(healthChecker.status.keys())) {
+  for (const key of Array.from(getHealthChecker().status.keys())) {
     if (prefixMatch(key)) {
-      healthChecker.status.delete(key);
+      getHealthChecker().status.delete(key);
       healthReset++;
     }
   }
   let circuitsReset = 0;
-  for (const key of Array.from(circuitBreaker.circuits.keys())) {
+  for (const key of Array.from(getCircuitBreaker().circuits.keys())) {
     if (prefixMatch(key)) {
-      circuitBreaker.circuits.delete(key);
+      getCircuitBreaker().circuits.delete(key);
       circuitsReset++;
     }
   }
@@ -4121,15 +4249,16 @@ function resetRoutingPointer(
   return { scope, stickyCleared, activeChannelsCleared, cooldownsCleared, healthReset, circuitsReset, failuresCleared };
 }
 
-let stickyPersistTimer: NodeJS.Timeout | null = null;
+
 
 function scheduleStickyPersist(config: RouterConfig): void {
-  if (stickyPersistTimer) return;
-  stickyPersistTimer = setTimeout(() => {
-    stickyPersistTimer = null;
+  const state = getRouterState();
+  if (state.stickyPersistTimer) return;
+  state.stickyPersistTimer = setTimeout(() => routerStateStorage.run(state, () => {
+    state.stickyPersistTimer = null;
     saveConfig(config);
     debugLog("[pi-router] Sticky records persisted");
-  }, 5000);
+  }), 5000);
 }
 
 async function relayAutoAttempt(
@@ -4199,7 +4328,7 @@ async function relayAutoAttempt(
       recordLatency(modelConfig.id, route.routeKey, latency);
       updateHealthStatus(modelConfig.id, route.routeKey, true);
       recordCircuitOutcome(modelConfig.id, route.routeKey, true);
-      routerState.activeChannels.set(routerModelId, route.routeKey);
+      getRouterState().activeChannels.set(routerModelId, route.routeKey);
       updateStickyRecord(routerModelId, modelConfig.id, channel, config, route.routeKey, route.upstreamId);
       updateRouteSnapshot(routerModelId, modelConfig.id, targetModel, "success");
       updateFooterStatus(routerModelId, channel, targetModel.id, "success", [...attemptedChannels], undefined, targetModel.api);
@@ -4324,7 +4453,7 @@ function routeAutoChannelFirst(
         }
       }
 
-      const failures = Array.from(routerState.lastFailures.values()).flat().slice(-Math.max(1, attemptedRoutes.length));
+      const failures = Array.from(getRouterState().lastFailures.values()).flat().slice(-Math.max(1, attemptedRoutes.length));
       const errorMsg = [
         `[pi-router] Auto router failed: all configured routes were exhausted.`,
         attemptedRoutes.length > 0 ? `Tried routes: ${attemptedRoutes.join(" → ")}` : "Tried routes: none",
@@ -4461,7 +4590,7 @@ function routeAutoCustom(
         if (ok) return;
       }
 
-      const failures = Array.from(routerState.lastFailures.values()).flat().slice(-Math.max(1, attemptedRoutes.length));
+      const failures = Array.from(getRouterState().lastFailures.values()).flat().slice(-Math.max(1, attemptedRoutes.length));
       const errorMsg = [
         `[pi-router] Auto router failed: all custom routes were exhausted.`,
         attemptedRoutes.length > 0 ? `Tried routes: ${attemptedRoutes.join(" → ")}` : "Tried routes: none",
@@ -4494,7 +4623,7 @@ function routeRequest(
   modelMap: Map<string, PiModel>
 ): AssistantMessageEventStream {
   const modelId = routerModel.id;
-  routerState.currentRouterModelId = modelId;
+  getRouterState().currentRouterModelId = modelId;
   
   // Special handling for "auto" meta-model (auto mode)
   if (modelId === "auto") {
@@ -4540,7 +4669,7 @@ function determineRouteOrder(
   // If sticky mode and we have an active route, try it first. activeChannels
   // stores a routeKey for new configs and a channel name for legacy configs.
   if (modelConfig.sticky !== false && config.sticky !== false) {
-    const activeRouteKey = routerState.activeChannels.get(modelId);
+    const activeRouteKey = getRouterState().activeChannels.get(modelId);
     const activeRoute = routes.find(route => route.routeKey === activeRouteKey || route.channel === activeRouteKey);
     if (activeRoute) {
       const activeSignature = getRouteSignature(activeRoute);
@@ -4948,7 +5077,7 @@ async function resolveUpstreamRequestAuth(
     delete nextOptions.apiKey;
   }
 
-  const modelRegistry = routerState.currentModelRegistry;
+  const modelRegistry = getRouterState().currentModelRegistry;
   if (!modelRegistry) {
     // Keep compatibility with authless SDK providers and isolated/legacy
     // embeddings, but never reconstruct credentials from auth.json or a stale
@@ -4963,7 +5092,7 @@ async function resolveUpstreamRequestAuth(
   if (typeof modelRegistry.getApiKeyAndHeaders === "function") {
     const registryAtStart = modelRegistry;
     const firstAuth = await getResolvedRegistryAuth(modelRegistry, model);
-    if (routerState.currentModelRegistry !== registryAtStart) {
+    if (getRouterState().currentModelRegistry !== registryAtStart) {
       throw new Error(`Registry auth temporarily unavailable for ${model.provider}: session registry changed`);
     }
     if (firstAuth.auth) {
@@ -4977,7 +5106,7 @@ async function resolveUpstreamRequestAuth(
       // A single bounded retry handles transient runtime/credential refresh races
       // without retaining request credentials across calls.
       const retryAuth = await getResolvedRegistryAuth(modelRegistry, model);
-      if (routerState.currentModelRegistry !== registryAtStart) {
+      if (getRouterState().currentModelRegistry !== registryAtStart) {
         throw new Error(`Registry auth temporarily unavailable for ${model.provider}: session registry changed`);
       }
       if (retryAuth.auth) {
@@ -5004,7 +5133,7 @@ async function resolveUpstreamRequestAuth(
       registryAuthError ||= getErrorMessage(error) || `No API key for provider: ${model.provider}`;
       debugLog(`[pi-router] Provider auth lookup failed for ${model.provider}:`, error);
     }
-    if (routerState.currentModelRegistry !== modelRegistry) {
+    if (getRouterState().currentModelRegistry !== modelRegistry) {
       throw new Error(`Registry auth temporarily unavailable for ${model.provider}: session registry changed`);
     }
     if (providerAuth) {
@@ -5063,7 +5192,7 @@ function streamThroughProvider(
   // Since pi 0.81, the model registry exposes the effective provider object.
   // Using it preserves native/extension provider stream implementations; the
   // compat dispatcher is only a fallback for isolated tests or older embeds.
-  const provider = routerState.currentModelRegistry?.getProvider?.(model.provider);
+  const provider = getRouterState().currentModelRegistry?.getProvider?.(model.provider);
   if (provider?.streamSimple) {
     return provider.streamSimple(model, context, options);
   }
@@ -5207,7 +5336,7 @@ function createFailoverStream(
       const key = getRouteStateKey(modelId, routeEntry.routeKey);
       
       // Check cooldown
-      const cooldownEnd = routerState.cooldowns.get(key);
+      const cooldownEnd = getRouterState().cooldowns.get(key);
       if (cooldownEnd && Date.now() < cooldownEnd) {
         const remainingMs = cooldownEnd - Date.now();
         debugLog(`[pi-router] Route ${routeEntry.label} in cooldown (${Math.ceil(remainingMs / 1000)}s remaining)`);
@@ -5280,11 +5409,11 @@ function createFailoverStream(
         recordLatency(modelId, route.routeKey, latency);
         updateHealthStatus(modelId, route.routeKey, true);
         recordCircuitOutcome(modelId, route.routeKey, true);
-        routerState.activeChannels.set(modelId, route.routeKey);
+        getRouterState().activeChannels.set(modelId, route.routeKey);
         updateRouteSnapshot(modelId, modelConfig.id, targetModel, "success");
         updateFooterStatus(modelId, channel, targetModel.id, "success", [...attemptedChannels], undefined, targetModel.api);
   
-        const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
+        const lastDecision = getDecisionLogger().decisions[getDecisionLogger().decisions.length - 1];
         if (lastDecision?.modelId === modelId && lastDecision.selectedChannel === routeDisplay) {
           lastDecision.latencyMs = latency;
         }
@@ -5361,10 +5490,10 @@ function recordFailure(
   const key = `${modelId}@${channel}`;
 
   // Record failure
-  if (!routerState.lastFailures.has(modelId)) {
-    routerState.lastFailures.set(modelId, []);
+  if (!getRouterState().lastFailures.has(modelId)) {
+    getRouterState().lastFailures.set(modelId, []);
   }
-  routerState.lastFailures.get(modelId)!.push({
+  getRouterState().lastFailures.get(modelId)!.push({
     channel,
     error,
     timestamp: Date.now(),
@@ -5409,7 +5538,7 @@ function recordFailure(
     cooldownMs = modelConfig.failover?.cooldownMs || config.failover?.cooldownMs || 60000;
   }
 
-  routerState.cooldowns.set(key, Date.now() + cooldownMs);
+  getRouterState().cooldowns.set(key, Date.now() + cooldownMs);
 
   debugLog(`[pi-router] Applied ${cooldownMs}ms cooldown to ${key}`);
 }
@@ -5463,7 +5592,7 @@ async function tryModelFallback(
 
   if (fallbackModels.length === 0) {
     // No fallback configured - show detailed error to user
-    const failures = routerState.lastFailures.get(modelId) || [];
+    const failures = getRouterState().lastFailures.get(modelId) || [];
     const recentFailures = failures.slice(-modelConfig.channels.length);
 
     const errorLines = [
@@ -5623,11 +5752,11 @@ async function tryModelFallback(
           recordLatency(fallbackSpec.id, channel, latency);
           updateHealthStatus(fallbackSpec.id, channel, true);
           recordCircuitOutcome(fallbackSpec.id, channel, true);
-          routerState.activeChannels.set(modelId, channel);
+          getRouterState().activeChannels.set(modelId, channel);
           updateRouteSnapshot(modelId, fallbackSpec.id, targetModel, "success");
           updateFooterStatus(modelId, channel, targetModel.id, "success", [...attemptedFallbackRoutes], undefined, targetModel.api);
 
-          const lastDecision = decisionLogger.decisions[decisionLogger.decisions.length - 1];
+          const lastDecision = getDecisionLogger().decisions[getDecisionLogger().decisions.length - 1];
           if (lastDecision?.modelId === modelId && lastDecision.selectedChannel === routeDisplay) {
             lastDecision.latencyMs = latency;
           }
@@ -5667,7 +5796,7 @@ async function tryModelFallback(
   }
 
   // All fallback attempts exhausted - show detailed summary
-  const failures = routerState.lastFailures.get(modelId) || [];
+  const failures = getRouterState().lastFailures.get(modelId) || [];
   const recentFailures = failures.slice(-10); // Last 10 failures
 
   debugLog(`[pi-router] ═══════════════════════════════════════════════════`);
@@ -5767,10 +5896,9 @@ type LatencyTracker = {
   maxRecords: number; // Keep last N measurements
 };
 
-const latencyTracker: LatencyTracker = {
-  records: new Map(),
-  maxRecords: 10, // Keep last 10 measurements per channel
-};
+function getLatencyTracker(): LatencyTracker {
+  return getRouterState().latencyTracker;
+}
 
 /**
  * Record latency for a channel
@@ -5778,11 +5906,11 @@ const latencyTracker: LatencyTracker = {
 function recordLatency(modelId: string, channel: string, latencyMs: number): void {
   const key = `${modelId}@${channel}`;
   
-  if (!latencyTracker.records.has(key)) {
-    latencyTracker.records.set(key, []);
+  if (!getLatencyTracker().records.has(key)) {
+    getLatencyTracker().records.set(key, []);
   }
   
-  const records = latencyTracker.records.get(key)!;
+  const records = getLatencyTracker().records.get(key)!;
   records.push({
     channel,
     latencyMs,
@@ -5790,7 +5918,7 @@ function recordLatency(modelId: string, channel: string, latencyMs: number): voi
   });
   
   // Keep only recent measurements
-  if (records.length > latencyTracker.maxRecords) {
+  if (records.length > getLatencyTracker().maxRecords) {
     records.shift();
   }
   
@@ -5802,7 +5930,7 @@ function recordLatency(modelId: string, channel: string, latencyMs: number): voi
  */
 function getAverageLatency(modelId: string, channel: string): number | null {
   const key = `${modelId}@${channel}`;
-  const records = latencyTracker.records.get(key);
+  const records = getLatencyTracker().records.get(key);
   
   if (!records || records.length === 0) {
     return null;
@@ -5855,11 +5983,9 @@ type HealthChecker = {
   enabled: boolean;
 };
 
-const healthChecker: HealthChecker = {
-  status: new Map(),
-  intervalMs: 60000, // Check every 60s
-  enabled: false, // Disabled by default (will enable in v0.2)
-};
+function getHealthChecker(): HealthChecker {
+  return getRouterState().healthChecker;
+}
 
 /**
  * Mark channel health status
@@ -5870,10 +5996,10 @@ function updateHealthStatus(
   healthy: boolean
 ): void {
   const key = `${modelId}@${channel}`;
-  const current = healthChecker.status.get(key);
+  const current = getHealthChecker().status.get(key);
   
   if (!current) {
-    healthChecker.status.set(key, {
+    getHealthChecker().status.set(key, {
       channel,
       healthy,
       lastCheck: Date.now(),
@@ -5893,7 +6019,7 @@ function updateHealthStatus(
  */
 function isChannelHealthy(modelId: string, channel: string): boolean {
   const key = `${modelId}@${channel}`;
-  const status = healthChecker.status.get(key);
+  const status = getHealthChecker().status.get(key);
   
   // If no health data, assume healthy
   if (!status) {
@@ -5927,23 +6053,20 @@ type CircuitBreaker = {
   enabled: boolean;
 };
 
-const circuitBreaker: CircuitBreaker = {
-  circuits: new Map(),
-  failureThreshold: 5, // Open after 5 consecutive failures
-  resetTimeoutMs: 120000, // Try again after 2 minutes
-  enabled: true,
-};
+function getCircuitBreaker(): CircuitBreaker {
+  return getRouterState().circuitBreaker;
+}
 
 /**
  * Check if circuit breaker allows request
  */
 function canAttemptChannel(modelId: string, channel: string): boolean {
-  if (!circuitBreaker.enabled) {
+  if (!getCircuitBreaker().enabled) {
     return true;
   }
   
   const key = `${modelId}@${channel}`;
-  const status = circuitBreaker.circuits.get(key);
+  const status = getCircuitBreaker().circuits.get(key);
   
   if (!status) {
     return true; // No circuit breaker for this channel yet
@@ -5982,12 +6105,12 @@ function recordCircuitOutcome(
   channel: string,
   success: boolean
 ): void {
-  if (!circuitBreaker.enabled) {
+  if (!getCircuitBreaker().enabled) {
     return;
   }
   
   const key = `${modelId}@${channel}`;
-  let status = circuitBreaker.circuits.get(key);
+  let status = getCircuitBreaker().circuits.get(key);
   
   if (!status) {
     status = {
@@ -5996,7 +6119,7 @@ function recordCircuitOutcome(
       lastFailureTime: 0,
       nextRetryTime: 0,
     };
-    circuitBreaker.circuits.set(key, status);
+    getCircuitBreaker().circuits.set(key, status);
   }
   
   if (success) {
@@ -6014,12 +6137,12 @@ function recordCircuitOutcome(
     if (status.state === "half-open") {
       // Failed during test, reopen circuit
       status.state = "open";
-      status.nextRetryTime = Date.now() + circuitBreaker.resetTimeoutMs;
-      debugLog(`[pi-router] Circuit reopened for ${key}, retry in ${circuitBreaker.resetTimeoutMs / 1000}s`);
-    } else if (status.failureCount >= circuitBreaker.failureThreshold) {
+      status.nextRetryTime = Date.now() + getCircuitBreaker().resetTimeoutMs;
+      debugLog(`[pi-router] Circuit reopened for ${key}, retry in ${getCircuitBreaker().resetTimeoutMs / 1000}s`);
+    } else if (status.failureCount >= getCircuitBreaker().failureThreshold) {
       // Open circuit after threshold
       status.state = "open";
-      status.nextRetryTime = Date.now() + circuitBreaker.resetTimeoutMs;
+      status.nextRetryTime = Date.now() + getCircuitBreaker().resetTimeoutMs;
       debugLog(`[pi-router] Circuit opened for ${key} after ${status.failureCount} failures`);
     }
   }
@@ -6047,25 +6170,23 @@ type DecisionLogger = {
   enabled: boolean;
 };
 
-const decisionLogger: DecisionLogger = {
-  decisions: [],
-  maxDecisions: 50, // Keep last 50 decisions
-  enabled: true,
-};
+function getDecisionLogger(): DecisionLogger {
+  return getRouterState().decisionLogger;
+}
 
 /**
  * Log routing decision
  */
 function logDecision(decision: RoutingDecision): void {
-  if (!decisionLogger.enabled) {
+  if (!getDecisionLogger().enabled) {
     return;
   }
   
-  decisionLogger.decisions.push(decision);
+  getDecisionLogger().decisions.push(decision);
   
   // Keep only recent decisions
-  if (decisionLogger.decisions.length > decisionLogger.maxDecisions) {
-    decisionLogger.decisions.shift();
+  if (getDecisionLogger().decisions.length > getDecisionLogger().maxDecisions) {
+    getDecisionLogger().decisions.shift();
   }
   
   debugLog(
@@ -6079,7 +6200,7 @@ function logDecision(decision: RoutingDecision): void {
  * Get recent routing decisions
  */
 function getRecentDecisions(limit: number = 10): RoutingDecision[] {
-  return decisionLogger.decisions.slice(-limit);
+  return getDecisionLogger().decisions.slice(-limit);
 }
 
 // ============================================================================
@@ -6105,15 +6226,9 @@ interface HealthProbeResult {
 // reject very short messages (e.g. "ping") as liveness probes.
 const DEFAULT_PROBE_MESSAGE = "Red, green, yellow — just tell me which color you like best.";
 
-const healthProber = {
-  enabled: false,
-  intervalMs: 5 * 60 * 1000,  // 5 minutes
-  timeoutMs: 10 * 1000,       // 10 seconds
-  probeMessage: DEFAULT_PROBE_MESSAGE,
-  timers: new Map<string, NodeJS.Timeout>(),
-  initialTimers: new Set<NodeJS.Timeout>(),
-  lastProbe: new Map<string, HealthProbeResult>(),
-};
+function getHealthProber() {
+  return getRouterState().healthProber;
+}
 
 /**
  * Start background health probes for all channels
@@ -6124,26 +6239,26 @@ function startHealthProbes(config: RouterConfig): void {
     return;
   }
   
-  healthProber.enabled = true;
-  healthProber.intervalMs = config.healthProbe.intervalMs || 5 * 60 * 1000;
-  healthProber.timeoutMs = config.healthProbe.timeoutMs || 10 * 1000;
+  getHealthProber().enabled = true;
+  getHealthProber().intervalMs = config.healthProbe.intervalMs || 5 * 60 * 1000;
+  getHealthProber().timeoutMs = config.healthProbe.timeoutMs || 10 * 1000;
   // probeMessage must be >10 characters: some third-party channels reject
   // short messages (e.g. "ping") as liveness probes. Fall back to the safe
   // default when the configured value is missing or too short.
   const configuredProbeMsg = config.healthProbe.probeMessage;
   if (configuredProbeMsg && configuredProbeMsg.length > 10) {
-    healthProber.probeMessage = configuredProbeMsg;
+    getHealthProber().probeMessage = configuredProbeMsg;
   } else {
     if (configuredProbeMsg) {
       debugLog(`[pi-router] probeMessage "${configuredProbeMsg}" is <=10 chars; some third-party channels reject short probes. Using default.`);
     }
-    healthProber.probeMessage = DEFAULT_PROBE_MESSAGE;
+    getHealthProber().probeMessage = DEFAULT_PROBE_MESSAGE;
   }
   
-  debugLog(`[pi-router] Starting health probes (interval: ${healthProber.intervalMs}ms)`);
+  debugLog(`[pi-router] Starting health probes (interval: ${getHealthProber().intervalMs}ms)`);
   
   // Probe all configured routes. Route keys distinguish same-provider variants.
-  const modelMap = getCachedModelMap(routerState.currentModelRegistry);
+  const modelMap = getCachedModelMap(getRouterState().currentModelRegistry);
   for (const modelConfig of config.models) {
     if (isDeprecatedModelId(modelConfig.id)) {
       continue;
@@ -6172,25 +6287,27 @@ function scheduleProbe(
   config: RouterConfig
 ): void {
   // Clear existing timer if any
-  const existingTimer = healthProber.timers.get(key);
+  const existingTimer = getHealthProber().timers.get(key);
   if (existingTimer) {
     clearInterval(existingTimer);
   }
 
+  const state = getRouterState();
+
   // Schedule periodic probe
   const timer = setInterval(() => {
-    probeChannel(key, modelConfig, routeEntry, config);
-  }, healthProber.intervalMs);
+    void routerStateStorage.run(state, () => probeChannel(key, modelConfig, routeEntry, config));
+  }, getHealthProber().intervalMs);
 
-  healthProber.timers.set(key, timer);
+  getHealthProber().timers.set(key, timer);
 
   // Delay initial probe by 30 seconds to avoid startup noise
   // This gives pi time to fully initialize before probing
-  const initialTimer = setTimeout(() => {
-    healthProber.initialTimers.delete(initialTimer);
-    probeChannel(key, modelConfig, routeEntry, config);
-  }, 30000);
-  healthProber.initialTimers.add(initialTimer);
+  const initialTimer = setTimeout(() => routerStateStorage.run(state, () => {
+    getHealthProber().initialTimers.delete(initialTimer);
+    void probeChannel(key, modelConfig, routeEntry, config);
+  }), 30000);
+  getHealthProber().initialTimers.add(initialTimer);
 }
 
 /**
@@ -6217,7 +6334,7 @@ async function probeChannel(
   
   try {
     // FIX #15: Use cached modelMap instead of rebuilding
-    const modelMap = getCachedModelMap(routerState.currentModelRegistry);
+    const modelMap = getCachedModelMap(getRouterState().currentModelRegistry);
 
     const route = resolveConfiguredRouteByEntry(modelConfig, routeEntry, modelMap);
     const targetModel = route?.model;
@@ -6231,7 +6348,7 @@ async function probeChannel(
       messages: [
         {
           role: "user",
-          content: healthProber.probeMessage,
+          content: getHealthProber().probeMessage,
           timestamp: Date.now(),
         },
       ],
@@ -6239,7 +6356,7 @@ async function probeChannel(
     
     // Forward to provider with timeout
     const stream = forwardToProvider(targetModel, probeContext, {
-      timeoutMs: healthProber.timeoutMs,
+      timeoutMs: getHealthProber().timeoutMs,
       maxRetries: 0,
     }, config, modelConfig.id, false);
     
@@ -6262,7 +6379,7 @@ async function probeChannel(
     const latencyMs = Date.now() - startTime;
     
     // Record success
-    healthProber.lastProbe.set(key, {
+    getHealthProber().lastProbe.set(key, {
       channel: route.routeLabel,
       success: true,
       latencyMs,
@@ -6283,7 +6400,7 @@ async function probeChannel(
     // and can be false negatives for providers that reject `ping`, have cold
     // starts, or need longer than the probe timeout. Real user traffic is the
     // source of truth for failover health.
-    healthProber.lastProbe.set(key, {
+    getHealthProber().lastProbe.set(key, {
       channel: routeEntry.label,
       success: false,
       error: formatUserFacingFailure(getErrorMessage(err)),
@@ -6300,62 +6417,62 @@ async function probeChannel(
 function stopHealthProbes(): void {
   debugLog("[pi-router] Stopping health probes");
   
-  for (const timer of healthProber.timers.values()) {
+  for (const timer of getHealthProber().timers.values()) {
     clearInterval(timer);
   }
-  for (const timer of healthProber.initialTimers.values()) {
+  for (const timer of getHealthProber().initialTimers.values()) {
     clearTimeout(timer);
   }
   
-  healthProber.timers.clear();
-  healthProber.initialTimers.clear();
-  healthProber.enabled = false;
+  getHealthProber().timers.clear();
+  getHealthProber().initialTimers.clear();
+  getHealthProber().enabled = false;
 }
 
 /**
  * Get health probe results
  */
 function getHealthProbeResults(): HealthProbeResult[] {
-  return Array.from(healthProber.lastProbe.values());
+  return Array.from(getHealthProber().lastProbe.values());
 }
 
 function __testResetInternalState(): void {
-  routerState.activeChannels.clear();
-  routerState.cooldowns.clear();
-  routerState.lastFailures.clear();
-  routerState.currentUi = undefined;
-  routerState.currentTheme = undefined;
-  routerState.currentModel = undefined;
-  routerState.currentModelProvider = undefined;
-  routerState.currentThinkingLevel = undefined;
-  routerState.currentSessionManager = undefined;
-  routerState.currentSessionHash = undefined;
-  routerState.currentRouterModelId = undefined;
-  routerState.currentGetContextUsage = undefined;
-  routerState.currentModelRegistry = undefined;
-  routerState.customFooterInstalled = undefined;
-  routerState.customFooterEnabled = undefined;
-  routerState.footerStatusLineEnabled = undefined;
-  routerState.lastStatusUpdate = undefined;
-  routerState.activeRouteSnapshots.clear();
-  routerState.routeListeners.clear();
-  routerState.unregisterRoutingAdapter?.();
-  routerState.unregisterRoutingAdapter = undefined;
-  latencyTracker.records.clear();
-  healthChecker.status.clear();
-  circuitBreaker.circuits.clear();
-  for (const timer of healthProber.timers.values()) {
+  getRouterState().activeChannels.clear();
+  getRouterState().cooldowns.clear();
+  getRouterState().lastFailures.clear();
+  getRouterState().currentUi = undefined;
+  getRouterState().currentTheme = undefined;
+  getRouterState().currentModel = undefined;
+  getRouterState().currentModelProvider = undefined;
+  getRouterState().currentThinkingLevel = undefined;
+  getRouterState().currentSessionManager = undefined;
+  getRouterState().currentSessionHash = undefined;
+  getRouterState().currentRouterModelId = undefined;
+  getRouterState().currentGetContextUsage = undefined;
+  getRouterState().currentModelRegistry = undefined;
+  getRouterState().customFooterInstalled = undefined;
+  getRouterState().customFooterEnabled = undefined;
+  getRouterState().footerStatusLineEnabled = undefined;
+  getRouterState().lastStatusUpdate = undefined;
+  getRouterState().activeRouteSnapshots.clear();
+  getRouterState().routeListeners.clear();
+  getRouterState().unregisterRoutingAdapter?.();
+  getRouterState().unregisterRoutingAdapter = undefined;
+  getLatencyTracker().records.clear();
+  getHealthChecker().status.clear();
+  getCircuitBreaker().circuits.clear();
+  for (const timer of getHealthProber().timers.values()) {
     clearInterval(timer);
   }
-  for (const timer of healthProber.initialTimers.values()) {
+  for (const timer of getHealthProber().initialTimers.values()) {
     clearTimeout(timer);
   }
-  healthProber.timers.clear();
-  healthProber.initialTimers.clear();
-  healthProber.lastProbe.clear();
-  healthProber.enabled = false;
-  healthProbeCostWarningShown = false;
-  decisionLogger.decisions.length = 0;
+  getHealthProber().timers.clear();
+  getHealthProber().initialTimers.clear();
+  getHealthProber().lastProbe.clear();
+  getHealthProber().enabled = false;
+  getRouterState().healthProbeCostWarningShown = false;
+  getDecisionLogger().decisions.length = 0;
   fileHashCache.clear();
   providerIdsCache = null;
   modelsCache = null;
@@ -6372,10 +6489,11 @@ function __testResetInternalState(): void {
   autoSyncChecked = false;
   autoSyncConfig = null;
   piConfigDirOverride = null;
-  if (stickyPersistTimer) {
-    clearTimeout(stickyPersistTimer);
-    stickyPersistTimer = null;
+  if (getRouterState().stickyPersistTimer) {
+    clearTimeout(getRouterState().stickyPersistTimer);
+    getRouterState().stickyPersistTimer = null;
   }
+  fallbackRouterState = createRouterState();
 }
 
 function __testSetPiConfigDir(configDir: string | null): void {
@@ -6393,11 +6511,11 @@ function __testSetPiConfigDir(configDir: string | null): void {
   fileHashCache.clear();
   configFileMtimeMs = null;
   currentRouterConfig = null;
-  routerState.activeRouteSnapshots.clear();
-  routerState.routeListeners.clear();
-  routerState.unregisterRoutingAdapter?.();
-  routerState.unregisterRoutingAdapter = undefined;
-  healthProbeCostWarningShown = false;
+  getRouterState().activeRouteSnapshots.clear();
+  getRouterState().routeListeners.clear();
+  getRouterState().unregisterRoutingAdapter?.();
+  getRouterState().unregisterRoutingAdapter = undefined;
+  getRouterState().healthProbeCostWarningShown = false;
   autoSyncChecked = false;
   autoSyncConfig = null;
 }
@@ -6425,7 +6543,7 @@ function __testGetCachedModelMap(modelRegistry?: any): Map<string, PiModel> {
 }
 
 function __testSetCurrentModelRegistry(modelRegistry: any): void {
-  routerState.currentModelRegistry = modelRegistry;
+  getRouterState().currentModelRegistry = modelRegistry;
 }
 
 function __testGetConfigurableModels(modelRegistry?: any, forceRefresh = false): PiModel[] {
@@ -6445,7 +6563,7 @@ function __testStartHealthProbes(config: RouterConfig): void {
 }
 
 function __testGetHealthProbeTimerKeys(): string[] {
-  return Array.from(healthProber.timers.keys());
+  return Array.from(getHealthProber().timers.keys());
 }
 
 function __testCalculateFileHash(filePath: string): string {
@@ -6454,16 +6572,16 @@ function __testCalculateFileHash(filePath: string): string {
 
 function __testGetInternalState() {
   return {
-    currentSessionManager: routerState.currentSessionManager,
-    currentModelRegistry: routerState.currentModelRegistry,
-    activeChannels: routerState.activeChannels,
-    cooldowns: routerState.cooldowns,
-    failures: routerState.lastFailures,
-    latencies: latencyTracker.records,
-    health: healthChecker.status,
-    circuits: circuitBreaker.circuits,
-    lastStatusUpdate: routerState.lastStatusUpdate,
-    decisions: decisionLogger.decisions,
+    currentSessionManager: getRouterState().currentSessionManager,
+    currentModelRegistry: getRouterState().currentModelRegistry,
+    activeChannels: getRouterState().activeChannels,
+    cooldowns: getRouterState().cooldowns,
+    failures: getRouterState().lastFailures,
+    latencies: getLatencyTracker().records,
+    health: getHealthChecker().status,
+    circuits: getCircuitBreaker().circuits,
+    lastStatusUpdate: getRouterState().lastStatusUpdate,
+    decisions: getDecisionLogger().decisions,
   };
 }
 
