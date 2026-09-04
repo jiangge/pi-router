@@ -7,7 +7,6 @@ import { visibleWidth } from '@earendil-works/pi-tui';
 import routerExtension, {
   __testGetInternalState,
   __testResetInternalState,
-  __testResetSessionProviderActiveFlag,
   __testRegisterRoutingAdapter,
   __testSetCurrentModelRegistry,
   __testSetPiConfigDir,
@@ -1962,20 +1961,20 @@ describe('extension reload lifecycle', () => {
     };
   }
 
-  it('registers providers eagerly at factory time when no session is active; re-binds on session_start and unregisters on shutdown', async () => {
-    // pi resolves settings.defaultProvider/defaultModel BEFORE session_start,
-    // so the factory must register the provider while no session owns it.
-    __testResetSessionProviderActiveFlag();
+  it('publishes startup model discovery before session_start, then binds request routing to the session', async () => {
     const harness = createExtensionHarness();
     routerExtension(harness.pi);
 
-    expect(harness.providers.has('router')).toBe(true);
+    const discoveryProvider = harness.providers.get('router');
+    expect(discoveryProvider).toBeDefined();
+    expect(discoveryProvider.streamSimple).toBeUndefined();
+    expect(discoveryProvider.models.map((model: any) => model.id)).toContain('m1');
     expect(harness.providerEvents).toEqual(['register:router']);
 
     await harness.emit('session_start', createSessionContext('session-a-key'));
 
     expect(harness.providerEvents).toEqual(['register:router', 'unregister:router', 'register:router']);
-    expect(harness.providers.get('router')).toBeDefined();
+    expect(harness.providers.get('router')?.streamSimple).toBeTypeOf('function');
 
     await harness.emit('session_shutdown');
 
@@ -1983,27 +1982,90 @@ describe('extension reload lifecycle', () => {
     expect(harness.providerEvents.at(-1)).toBe('unregister:router');
   });
 
-  it('does not let a late session-less duplicate replace the active provider or routing adapter', async () => {
+  it('does not let a late discovery-only duplicate replace the active provider stream or routing adapter', async () => {
+    // ModelRuntime merges defined registration fields over the existing provider.
+    // Simulate that contract so an omitted discovery stream cannot replace the
+    // active session closure, while its static model catalog remains visible.
     const sharedProviders = new Map<string, any>();
     const session = createExtensionHarness();
-    session.pi.registerProvider = (name: string, config: any) => sharedProviders.set(name, config);
+    const registerMergedProvider = (name: string, config: any) => {
+      sharedProviders.set(name, { ...sharedProviders.get(name), ...config });
+    };
+    session.pi.registerProvider = registerMergedProvider;
     session.pi.unregisterProvider = (name: string) => sharedProviders.delete(name);
     routerExtension(session.pi);
     await session.emit('session_start', createSessionContext('session-a-key'));
     const activeProvider = sharedProviders.get('router');
+    const activeStream = activeProvider.streamSimple;
     const routingRegistry = (globalThis as any)[Symbol.for('pi.routing.registry.v1')];
     const activeAdapter = routingRegistry.getRouter('router');
 
     const duplicate = createExtensionHarness();
-    duplicate.pi.registerProvider = (name: string, config: any) => sharedProviders.set(name, config);
+    duplicate.pi.registerProvider = registerMergedProvider;
     duplicate.pi.unregisterProvider = (name: string) => sharedProviders.delete(name);
     routerExtension(duplicate.pi);
 
-    expect(duplicate.providerEvents).toEqual([]);
-    expect(sharedProviders.get('router')).toBe(activeProvider);
+    expect(sharedProviders.get('router')).not.toBe(activeProvider);
+    expect(sharedProviders.get('router')?.streamSimple).toBe(activeStream);
     expect(routingRegistry.getRouter('router')).toBe(activeAdapter);
 
     await session.emit('session_shutdown');
+  });
+
+  it('preserves the active stream when Pi merges a discovery-only re-registration', () => {
+    const model = { id: 'm1' };
+    const activeStream = () => 'active';
+    const registeredProvider: any = {
+      api: 'pi-router',
+      baseUrl: 'https://router.internal',
+      apiKey: 'router',
+      models: [model],
+      streamSimple: activeStream,
+    };
+    const discoveryProvider = {
+      api: 'pi-router',
+      baseUrl: 'https://router.internal',
+      apiKey: 'router',
+      models: [model],
+    };
+
+    // Pi's ModelRuntime.registerProvider merges only defined fields over the
+    // previous extension provider registration.
+    const effective = { ...registeredProvider };
+    for (const [key, value] of Object.entries(discoveryProvider)) {
+      if (value !== undefined) effective[key] = value;
+    }
+
+    expect(effective.streamSimple).toBe(activeStream);
+  });
+
+  it('keeps startup discovery and teardown isolated across independent AgentSessions', async () => {
+    const first = createExtensionHarness();
+    routerExtension(first.pi);
+    await first.emit('session_start', createSessionContext('session-a-key'));
+
+    const second = createExtensionHarness();
+    routerExtension(second.pi);
+    expect(second.providers.get('router')?.streamSimple).toBeUndefined();
+    expect(second.providers.get('router')?.models.map((model: any) => model.id)).toContain('m1');
+
+    await second.emit('session_start', createSessionContext('session-b-key'));
+    const secondStream = second.providers.get('router')?.streamSimple;
+    expect(secondStream).toBeTypeOf('function');
+
+    // Shutting down another ModelRuntime must not suppress discovery globally
+    // or mutate the active provider registration in this runtime.
+    await first.emit('session_shutdown');
+    const lateSecondDiscovery = createExtensionHarness();
+    const registerMergedSecondProvider = (name: string, config: any) => {
+      second.providers.set(name, { ...second.providers.get(name), ...config });
+    };
+    lateSecondDiscovery.pi.registerProvider = registerMergedSecondProvider;
+    lateSecondDiscovery.pi.unregisterProvider = (name: string) => second.providers.delete(name);
+    routerExtension(lateSecondDiscovery.pi);
+
+    expect(second.providers.get('router')?.streamSimple).toBe(secondStream);
+    await second.emit('session_shutdown');
   });
 
   it('drops stale session references and routing adapters before the replacement instance starts', async () => {

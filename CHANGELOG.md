@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Default router startup model**: expose configured `router/*` models during startup discovery so `defaultProvider: "router"` and `defaultModel: "auto"` resolve before `session_start`, while keeping request routing and authentication session-bound. Discovery-only registrations omit the stream handler, preventing late duplicate evaluations from replacing an active session closure without process-global ownership state.
+
+### Tests
+
+- Added lifecycle coverage for discovery-only startup registration, late duplicate evaluation, independent `AgentSession` startup, and interleaved session teardown.
+
 ## [0.5.3] - 2026-09-03
 
 ### Fixed
