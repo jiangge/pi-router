@@ -7,6 +7,7 @@ import { visibleWidth } from '@earendil-works/pi-tui';
 import routerExtension, {
   __testGetInternalState,
   __testResetInternalState,
+  __testResetSessionProviderActiveFlag,
   __testRegisterRoutingAdapter,
   __testSetCurrentModelRegistry,
   __testSetPiConfigDir,
@@ -1961,16 +1962,19 @@ describe('extension reload lifecycle', () => {
     };
   }
 
-  it('registers providers only after session_start and unregisters them on shutdown', async () => {
+  it('registers providers eagerly at factory time when no session is active; re-binds on session_start and unregisters on shutdown', async () => {
+    // pi resolves settings.defaultProvider/defaultModel BEFORE session_start,
+    // so the factory must register the provider while no session owns it.
+    __testResetSessionProviderActiveFlag();
     const harness = createExtensionHarness();
     routerExtension(harness.pi);
 
-    expect(harness.providers.has('router')).toBe(false);
-    expect(harness.providerEvents).toEqual([]);
+    expect(harness.providers.has('router')).toBe(true);
+    expect(harness.providerEvents).toEqual(['register:router']);
 
     await harness.emit('session_start', createSessionContext('session-a-key'));
 
-    expect(harness.providerEvents).toEqual(['unregister:router', 'register:router']);
+    expect(harness.providerEvents).toEqual(['register:router', 'unregister:router', 'register:router']);
     expect(harness.providers.get('router')).toBeDefined();
 
     await harness.emit('session_shutdown');

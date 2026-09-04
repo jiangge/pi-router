@@ -34,6 +34,11 @@ const DEFAULT_ROUTER_TIMEOUT_MS = Number(process.env.PI_ROUTER_TIMEOUT_MS || 120
 const DEFAULT_ROUTER_MAX_TOKENS = Number(process.env.PI_ROUTER_MAX_TOKENS || 32768);
 const PI_ROUTING_REGISTRY = Symbol.for("pi.routing.registry.v1");
 const PI_CACHE_HINTS = Symbol.for("pi.cache.hints.v1");
+// Process-global marker: a live session currently owns the "router" provider
+// registration. Factory-time eager registration is skipped while this is set
+// so a late bootstrap/headless module instance cannot replace the active
+// session provider (see the session-bound registration tests).
+const PI_ROUTER_SESSION_PROVIDER_ACTIVE = Symbol.for("pi.router.session-provider-active.v1");
 
 // A module-local nonce identifies which evaluated extension copy emitted a
 // line without sharing ownership or authentication state through globalThis.
@@ -2477,11 +2482,30 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Provider and route-adapter registration is session-bound. Pi can evaluate
-  // extension factories for bootstrap/headless discovery without ever starting
-  // a session; keeping factory evaluation side-effect free prevents a late
-  // duplicate module instance from replacing the active session provider.
-  if (!config.models?.length) {
+  // Register eagerly when static configuration is available AND no session
+  // currently owns the provider, so that pi's default-model resolution
+  // (settings.defaultProvider / settings.defaultModel) can see router models:
+  // findInitialModel runs BEFORE session_start fires, so purely session-bound
+  // registration would make defaultProvider=router / defaultModel=auto
+  // silently fall back to another model.
+  //
+  // The author's duplicate-instance guarantee is preserved: while a session
+  // holds the provider (flag set in session_start), a late bootstrap/headless
+  // factory evaluation in the same process skips registration instead of
+  // replacing the active session provider.
+  if (config.models && config.models.length > 0) {
+    const sessionOwnsProvider = Boolean(
+      (globalThis as Record<PropertyKey, unknown>)[PI_ROUTER_SESSION_PROVIDER_ACTIVE]
+    );
+    if (!sessionOwnsProvider) {
+      if (!currentModels) {
+        currentModels = loadModelsJson();
+      }
+      registerRouterProvider(pi, config, currentModels);
+    } else {
+      debugLog("[pi-router] Active session owns the router provider; deferring registration to session_start.");
+    }
+  } else {
     debugLog("[pi-router] No models configured yet. Waiting for session_start auto-discovery or configuration.");
   }
 
@@ -2582,6 +2606,9 @@ export default function (pi: ExtensionAPI) {
         : (currentModels || loadModelsJson());
       currentModels = modelsForRegistration;
       registerRouterProvider(pi, currentConfig, modelsForRegistration);
+      // Mark the session as the owner of the provider registration so late
+      // bootstrap/headless factory evaluations skip re-registration.
+      (globalThis as Record<PropertyKey, unknown>)[PI_ROUTER_SESSION_PROVIDER_ACTIVE] = true;
     }
 
     scheduleSessionResources(currentConfig);
@@ -2593,6 +2620,7 @@ export default function (pi: ExtensionAPI) {
     clearSessionResources();
     restoreDefaultFooter();
     pi.unregisterProvider("router");
+    (globalThis as Record<PropertyKey, unknown>)[PI_ROUTER_SESSION_PROVIDER_ACTIVE] = false;
     routerState.unregisterRoutingAdapter?.();
     routerState.unregisterRoutingAdapter = undefined;
     routerState.routeListeners.clear();
@@ -6417,6 +6445,10 @@ function __testSetCurrentModelRegistry(modelRegistry: any): void {
   routerState.currentModelRegistry = modelRegistry;
 }
 
+function __testResetSessionProviderActiveFlag(): void {
+  delete (globalThis as Record<PropertyKey, unknown>)[PI_ROUTER_SESSION_PROVIDER_ACTIVE];
+}
+
 function __testGetConfigurableModels(modelRegistry?: any, forceRefresh = false): PiModel[] {
   return getConfigurableModels(modelRegistry, forceRefresh);
 }
@@ -6499,6 +6531,7 @@ export {
   __testRefreshConfigFromDisk,
   __testGetCachedModelMap,
   __testSetCurrentModelRegistry,
+  __testResetSessionProviderActiveFlag,
   __testGetConfigurableModels,
   __testGetSyncModels,
   __testRegisterRoutingAdapter,
