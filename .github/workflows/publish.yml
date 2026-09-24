@@ -4,13 +4,14 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   publish:
-    if: github.repository == 'jiangge/pi-router'
+    if: github.repository == 'jiangge/pi-router' && (github.ref_type == 'tag' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,8 +24,15 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
       - name: Update npm for trusted publishing
         run: npm install --global npm@latest
-      - name: Verify tag matches package version
-        run: test "${GITHUB_REF_NAME}" = "v$(node -p 'require("./package.json").version')"
+      - name: Verify release version
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            test "${GITHUB_REF_NAME}" = "v${version}"
+          else
+            test "${GITHUB_REF_NAME}" = master
+            test "$(git ls-remote --tags origin "refs/tags/v${version}" | wc -l)" -eq 1
+          fi
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
