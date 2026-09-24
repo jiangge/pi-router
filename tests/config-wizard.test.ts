@@ -512,7 +512,7 @@ describe('config order adjustment helpers', () => {
     expect(editable[0].channels.map(channel => channel.channel)).toEqual(['xiaojimao', 'pipi', 'openai', 'wong']);
     expect(editable[0].channels[0].reason).toBe('Third-party platform');
     expect(editable[0].channels[2].reason).toBe('Configured channel (currently unavailable)');
-    expect(editable[1].channels[0].reason).toBe('Official API');
+    expect(editable[1].channels[0].reason).toBe('Official domain');
   });
 
   it('builds editable duplicate-provider routes with display-only upstream labels', () => {
