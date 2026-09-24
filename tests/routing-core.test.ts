@@ -146,10 +146,10 @@ describe('routing core helpers', () => {
 
   it('sanitizes context for none summary and full strategies', () => {
     const baseContext = {
-      systemPrompt: 'system prompt',
       thinkingLevel: 'high',
       thinkingLevelMap: { high: 'high' },
       messages: [
+        { role: 'system', content: 'system prompt', timestamp: 1 },
         { role: 'developer', content: 'rules' },
         { role: 'user', content: 'hello' },
         { role: 'assistant', content: 'world' },
@@ -167,14 +167,16 @@ describe('routing core helpers', () => {
     } as any;
 
     const noneResult = sanitizeContextForSwitch(baseContext, fromModel, toModel, 'none', 'summary text');
-    expect(noneResult.messages).toEqual([]);
-    expect(noneResult.systemPrompt).toContain('summary text');
+    expect(noneResult.messages).toEqual([{ role: 'system', content: expect.stringContaining('summary text'), timestamp: 1 }]);
 
     const summaryResult = sanitizeContextForSwitch(baseContext, fromModel, toModel, 'summary', 'summary text');
-    expect(summaryResult.messages).toEqual([{ role: 'user', content: 'summary text' }]);
+    expect(summaryResult.messages).toEqual([
+      { role: 'system', content: 'system prompt', timestamp: 1 },
+      { role: 'user', content: 'summary text' },
+    ]);
 
     const fullResult = sanitizeContextForSwitch(baseContext, fromModel, toModel, 'full');
-    expect(fullResult.messages.length).toBe(4);
+    expect(fullResult.messages.length).toBe(5);
     expect(fullResult.messages[0].role).toBe('system');
     expect(fullResult.thinkingLevel).toBeUndefined();
     expect(fullResult.thinkingLevelMap).toBeUndefined();
@@ -942,7 +944,7 @@ describe('request and event helpers', () => {
     const stream = createFailoverStream(
       'deepseek-v4-flash',
       ['wx-api'],
-      { systemPrompt: 'original prompt', messages: [] } as any,
+      { messages: [{ role: 'system', content: 'original prompt', sections: { tools: 'tool instructions' }, timestamp: 1 }, { role: 'user', content: 'hello', timestamp: 2 }] } as any,
       undefined,
       {} as any,
       {
@@ -966,7 +968,10 @@ describe('request and event helpers', () => {
       provider: 'wx-api',
       api: 'pi-router-alias-route-test-api',
     });
-    expect(calls[0].context.systemPrompt).toBe('optimized system prompt');
+    expect(calls[0].context.messages).toEqual([
+      { role: 'system', content: 'optimized system prompt', sections: { tools: 'tool instructions' }, timestamp: 1 },
+      { role: 'user', content: 'hello', timestamp: 2 },
+    ]);
     expect(calls[0].options).toMatchObject({
       sessionId: 'cache-session-key',
       cacheRetention: 'long',

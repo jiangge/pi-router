@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-09-24
+
+### Fixed
+
+- Adapt routed provider requests to Pi 0.86+ transcript contexts: apply cache hints to the leading system message and preserve system instructions when transferring or truncating context across models.
+
+### Release
+
+- Publish tagged releases to npm using GitHub Actions OIDC trusted publishing with provenance.
+
 ## [0.5.4] - 2026-09-05
 
 ### Fixed

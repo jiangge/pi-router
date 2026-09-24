@@ -2075,8 +2075,15 @@ function applyCacheHintsToRequest(
 
   if (!hints) return { context, options };
 
-  const nextContext = hints.systemPrompt && hints.systemPrompt !== context.systemPrompt
-    ? { ...context, systemPrompt: hints.systemPrompt }
+  // Pi 0.86+ passes a transcript: provider adapters read the leading system
+  // message, not the legacy context.systemPrompt field. Preserve its sections
+  // and tool declarations when replacing only the prompt text.
+  const messages = context.messages as any[];
+  const leadingSystem = messages[0]?.role === "system" ? messages[0] : undefined;
+  const nextContext = hints.systemPrompt && hints.systemPrompt !== leadingSystem?.content
+    ? { ...context, messages: leadingSystem
+        ? [{ ...leadingSystem, content: hints.systemPrompt }, ...messages.slice(1)]
+        : [{ role: "system" as const, content: hints.systemPrompt, timestamp: Date.now() }, ...messages] }
     : context;
   const nextOptions: SimpleStreamOptions | undefined = options ? { ...options } : {};
 
@@ -3477,7 +3484,8 @@ async function generateSummaryWithModel(
  * Extracts key information from the conversation without using AI.
  */
 function estimateContextTokens(context: any): number {
-  const systemPrompt = typeof context?.systemPrompt === "string" ? context.systemPrompt : "";
+  const systemPrompt = typeof context?.systemPrompt === "string" ? context.systemPrompt :
+    context?.messages?.[0]?.role === "system" ? JSON.stringify(context.messages[0].content) : "";
   const messages = Array.isArray(context?.messages) ? context.messages : [];
   const raw = [
     systemPrompt,
@@ -3557,12 +3565,13 @@ function sanitizeContextForSwitch(
   
   // Strategy: none - minimal context, just system prompt
   if (transferStrategy === "none") {
-    sanitized.messages = [];
-    if (summary) {
-      sanitized.systemPrompt = `${context.systemPrompt || ""}
+    const system = context.messages?.[0]?.role === "system" ? context.messages[0] : undefined;
+    sanitized.messages = system ? [system] : [];
+    if (summary && system) {
+      sanitized.messages = [{ ...system, content: `${typeof system.content === "string" ? system.content : JSON.stringify(system.content)}
 
 [Model switched: ${fromModel.id} → ${toModel.id}]
-${summary}`;
+${summary}` }];
     }
     return sanitized;
   }
@@ -3570,6 +3579,7 @@ ${summary}`;
   // Strategy: summary - replace conversation with summary
   if (transferStrategy === "summary" && summary) {
     sanitized.messages = [
+      ...(context.messages?.[0]?.role === "system" ? [context.messages[0]] : []),
       {
         role: "user",
         content: summary,
@@ -3588,7 +3598,8 @@ ${summary}`;
       const ratio = toModel.contextWindow / fromModel.contextWindow;
       const keepCount = Math.floor((sanitized.messages?.length || 0) * ratio);
       if (sanitized.messages && sanitized.messages.length > keepCount) {
-        sanitized.messages = sanitized.messages.slice(-keepCount);
+        const system = sanitized.messages[0]?.role === "system" ? sanitized.messages[0] : undefined;
+        sanitized.messages = [...(system ? [system] : []), ...sanitized.messages.slice(-Math.max(1, keepCount))];
         debugLog(`[pi-router] Truncated context: ${sanitized.messages.length} messages kept`);
       }
     }
