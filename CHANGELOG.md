@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-10-01
+
+### Compatibility
+
+- Verified with Pi `0.99.2` without code changes: typecheck, all tests, and extension loading pass.
+
+### Documentation
+
+- Listed specific-model routing (`router/your-model-id`) under README Features.
+- Documented the `router/auto` naming overlap with Pi 0.99+ native virtual models: depending on load order, another extension's virtual `router/auto` either fails to register or hides pi-router's model.
+
+### Tests
+
+- Isolated the config-order wizard test from the developer's real Pi `auth.json`, which previously changed the expected channel classification and failed locally while passing in CI.
+
 ## [0.5.5] - 2026-09-24
 
 ### Fixed

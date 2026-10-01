@@ -493,26 +493,39 @@ describe('config order adjustment helpers', () => {
   });
 
   it('builds editable models from current config order and appends discovered channels', () => {
-    const editable = buildEditableModelsFromConfig(
-      {
-        models: [
-          { id: 'gpt-5.5', channels: ['xiaojimao', 'pipi', 'router', 'openai'] },
-          { id: 'deepseek-v4-flash', channels: ['deepseek'] },
-        ],
-      } as any,
-      [
-        { id: 'gpt-5.5', provider: 'pipi', baseUrl: 'https://agg.example.com/v1' },
-        { id: 'gpt-5.5', provider: 'xiaojimao', baseUrl: 'https://agg.example.com/v1' },
-        { id: 'gpt-5.5', provider: 'wong', baseUrl: 'https://agg.example.com/v1' },
-        { id: 'deepseek-v4-flash', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1' },
-      ],
-    );
+    // Classification reads auth.json from Pi's agent directory. Isolate it so a
+    // developer's real credentials (e.g. a deepseek api_key, which yields
+    // "Official API") cannot change the expected unauthenticated result.
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-router-wizard-agent-'));
+    try {
+      process.env.PI_CODING_AGENT_DIR = agentDir;
 
-    expect(editable.map(model => model.id)).toEqual(['gpt-5.5', 'deepseek-v4-flash']);
-    expect(editable[0].channels.map(channel => channel.channel)).toEqual(['xiaojimao', 'pipi', 'openai', 'wong']);
-    expect(editable[0].channels[0].reason).toBe('Third-party platform');
-    expect(editable[0].channels[2].reason).toBe('Configured channel (currently unavailable)');
-    expect(editable[1].channels[0].reason).toBe('Official domain');
+      const editable = buildEditableModelsFromConfig(
+        {
+          models: [
+            { id: 'gpt-5.5', channels: ['xiaojimao', 'pipi', 'router', 'openai'] },
+            { id: 'deepseek-v4-flash', channels: ['deepseek'] },
+          ],
+        } as any,
+        [
+          { id: 'gpt-5.5', provider: 'pipi', baseUrl: 'https://agg.example.com/v1' },
+          { id: 'gpt-5.5', provider: 'xiaojimao', baseUrl: 'https://agg.example.com/v1' },
+          { id: 'gpt-5.5', provider: 'wong', baseUrl: 'https://agg.example.com/v1' },
+          { id: 'deepseek-v4-flash', provider: 'deepseek', baseUrl: 'https://api.deepseek.com/v1' },
+        ],
+      );
+
+      expect(editable.map(model => model.id)).toEqual(['gpt-5.5', 'deepseek-v4-flash']);
+      expect(editable[0].channels.map(channel => channel.channel)).toEqual(['xiaojimao', 'pipi', 'openai', 'wong']);
+      expect(editable[0].channels[0].reason).toBe('Third-party platform');
+      expect(editable[0].channels[2].reason).toBe('Configured channel (currently unavailable)');
+      expect(editable[1].channels[0].reason).toBe('Official domain');
+    } finally {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+      fs.rmSync(agentDir, { recursive: true, force: true });
+    }
   });
 
   it('builds editable duplicate-provider routes with display-only upstream labels', () => {

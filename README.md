@@ -20,6 +20,7 @@ English | [简体中文](./README.zh-CN.md)
 ## Features
 
 - **Auto Router mode** — select `router/auto` and let pi-router handle all routing automatically
+- **Specific model with routing** — select `router/your-model-id` to route one configured model across its channels, with failover, circuit breaker, sticky routing, and optional `fallbackModels`
 - Channel failover for the same model across different providers
 - Model fallback with context transfer
 - Smart routing by latency, capability, cost, or manual order
@@ -117,6 +118,8 @@ pi-router will then:
 - record health and latency information
 - display the active channel in the footer (e.g., `via anthropic`)
 - remember the last successful route for next time (sticky mode)
+
+Note: pi `0.99+` adds native virtual models (`pi.registerVirtualModel()`), and Pi's documentation example registers `router/auto`, the same ID pi-router uses. If both are loaded, either that extension fails to register ("conflicts with a physical model") or pi-router's `router/auto` is hidden, depending on load order. Give your own virtual models a different provider, such as `my-router/auto`. The bundled `jev-router` example uses `jev/auto` and does not conflict.
 
 ## Commands
 

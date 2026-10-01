@@ -20,6 +20,7 @@ Pi 的智能路由层，提供多级故障转移与可观测性。
 ## 特性
 
 - **Auto Router 模式** — 选择 `router/auto` 即可全自动路由
+- **指定模型路由** — 选择 `router/your-model-id`，在该模型配置的通道间路由，支持故障转移、熔断器、粘性路由及可选的 `fallbackModels` 降级
 - 同一模型跨多个提供商的通道故障转移
 - 模型降级与上下文迁移
 - 按延迟、能力、成本或手动顺序的智能路由
@@ -117,6 +118,8 @@ pi-router 会：
 - 记录健康状态和延迟信息
 - 在底部状态栏显示活跃通道（如 `via anthropic`）
 - 记住上次成功的路由，下次优先使用（粘性模式）
+
+注意：pi `0.99+` 新增了原生虚拟模型（`pi.registerVirtualModel()`），而 Pi 文档示例注册的正是 `router/auto`，与 pi-router 使用的 ID 相同。两者同时加载时，取决于加载顺序，要么该扩展注册失败（报 "conflicts with a physical model"），要么 pi-router 的 `router/auto` 被遮挡。自己编写虚拟模型时请使用其他 provider，如 `my-router/auto`。Pi 自带的 `jev-router` 示例使用 `jev/auto`，不会冲突。
 
 ## 命令
 
