@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-10-03
+
+### Fixed
+
+- Enforced single-flight half-open circuit recovery so only one probe request can test a recovering route at a time.
+- Applied the same cooldown and circuit-breaker admission rules to primary, auto, and fallback routes, including route-key isolation for same-provider upstream variants.
+- Kept committed-stream failures from being recorded as healthy terminal successes while preserving the no-failover-after-commit safety boundary.
+- Scoped configuration lifecycle and registry-derived model-map caches to the active router session, and keyed process-level file caches by both path and mtime.
+- Replaced broad failure substring matching with structured failure classification for auth, transient auth, network, timeout, rate-limit, provider, abort, and unknown failures.
+- Made `pi-router.json` replacement atomic using a same-directory temporary file and rename.
+- Implemented `capabilityFirst` ordering using the actual upstream model targeted by each route, preserving config order for unknown or tied models.
+
+### Changed
+
+- Introduced a shared route execution engine used by normal routing, `router/auto`, and model fallback.
+- Extracted stream relay/commit handling, circuit breaking, failure classification, and atomic file writes into focused core modules.
+- Updated architecture and README documentation to match the current runtime behavior and route-key state model.
+
+### Tests
+
+- Expanded regression coverage for half-open concurrency, fallback admission, shared route execution, committed-stream failures, session cache isolation, failure classification, atomic config writes, and capability-first ordering.
+
 ## [0.5.6] - 2026-10-01
 
 ### Compatibility

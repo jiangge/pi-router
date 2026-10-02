@@ -14,14 +14,14 @@ function commandOutput(command: string, args: string[]): string | undefined {
   }
 }
 
-function findPackageRoot(startPath: string): string | undefined {
+function findPackageRoot(startPath: string, packageName: string): string | undefined {
   let current = path.dirname(startPath);
   while (current !== path.dirname(current)) {
     const packageJson = path.join(current, 'package.json');
     if (existsSync(packageJson)) {
       try {
         const manifest = JSON.parse(readFileSync(packageJson, 'utf8')) as { name?: string };
-        if (manifest.name === '@earendil-works/pi-coding-agent') return current;
+        if (manifest.name === packageName) return current;
       } catch {
         // Continue searching parent directories.
       }
@@ -33,7 +33,17 @@ function findPackageRoot(startPath: string): string | undefined {
 
 function resolvePiPackageRoot(): string {
   const configured = process.env.PI_ROUTER_TEST_PI_ROOT;
-  if (configured) return configured;
+  if (configured) {
+    const packageJson = path.join(configured, 'package.json');
+    if (existsSync(packageJson)) {
+      try {
+        const manifest = JSON.parse(readFileSync(packageJson, 'utf8')) as { name?: string };
+        if (manifest.name === '@earendil-works/pi-coding-agent') return realpathSync(configured);
+      } catch {
+        // Fall back to executable discovery below.
+      }
+    }
+  }
 
   const piBinLines = (process.platform === 'win32'
     ? commandOutput('where', ['pi'])
@@ -42,13 +52,15 @@ function resolvePiPackageRoot(): string {
   for (const line of piBinLines) {
     const candidate = line.trim();
     if (!candidate || !existsSync(candidate)) continue;
-    packageRoot = findPackageRoot(realpathSync(candidate));
+    packageRoot = findPackageRoot(realpathSync(candidate), '@earendil-works/pi-coding-agent');
     if (packageRoot) break;
   }
   if (packageRoot) return packageRoot;
 
   const voltaPiBin = commandOutput('volta', ['which', 'pi']);
-  const voltaPackageRoot = voltaPiBin ? findPackageRoot(realpathSync(voltaPiBin)) : undefined;
+  const voltaPackageRoot = voltaPiBin
+    ? findPackageRoot(realpathSync(voltaPiBin), '@earendil-works/pi-coding-agent')
+    : undefined;
   if (voltaPackageRoot) return voltaPackageRoot;
 
   throw new Error(
@@ -58,9 +70,32 @@ function resolvePiPackageRoot(): string {
 }
 
 const piRoot = resolvePiPackageRoot();
-const piNodeModules = path.join(piRoot, 'node_modules', '@earendil-works');
-const piAiRoot = path.join(piNodeModules, 'pi-ai');
-const piTuiRoot = path.join(piNodeModules, 'pi-tui');
+
+function resolvePiDependencyRoot(packageName: string): string {
+  let current = piRoot;
+  while (true) {
+    for (const candidate of [
+      path.join(current, 'node_modules', packageName),
+      path.join(current, packageName),
+    ]) {
+      const packageJson = path.join(candidate, 'package.json');
+      if (!existsSync(packageJson)) continue;
+      try {
+        const manifest = JSON.parse(readFileSync(packageJson, 'utf8')) as { name?: string };
+        if (manifest.name === packageName) return realpathSync(candidate);
+      } catch {
+        // Continue searching parent installation roots.
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  throw new Error(`Unable to locate ${packageName} from Pi package root: ${piRoot}`);
+}
+
+const piAiRoot = resolvePiDependencyRoot('@earendil-works/pi-ai');
+const piTuiRoot = resolvePiDependencyRoot('@earendil-works/pi-tui');
 
 export default defineConfig({
   resolve: {

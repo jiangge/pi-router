@@ -61,6 +61,7 @@ pi install /path/to/pi-router
 
 1. 路由策略（`channelFirst` / `custom`）
 2. 排序策略（`latency` / `capabilityFirst` / `cost` / `manual`）
+   - `capabilityFirst` 按每条 route 实际指向的上游模型能力排序；能力未知或同分时保持配置顺序。
 3. 自动同步（推荐 `启用` / `禁用`）
 4. 健康探测（推荐 `禁用` / `10 分钟`）
 5. 粘性模式（`启用` / `禁用`）

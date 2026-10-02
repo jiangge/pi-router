@@ -5,11 +5,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createAssistantMessageEventStream, registerApiProvider } from '@earendil-works/pi-ai/compat';
 import { visibleWidth } from '@earendil-works/pi-tui';
 import routerExtension, {
+  __testCreateRouterState,
+  __testGetCachedModelMap,
   __testGetInternalState,
   __testResetInternalState,
   __testRegisterRoutingAdapter,
   __testSetCurrentModelRegistry,
   __testSetPiConfigDir,
+  __testRunWithRouterState,
   canAttemptChannel,
   createFailoverStream,
   createMirrorModels,
@@ -200,6 +203,27 @@ describe('routing core helpers', () => {
 });
 
 describe('routing state helpers', () => {
+  it('keeps model-map caches isolated across independent router states', () => {
+    const stateA = __testCreateRouterState();
+    const stateB = __testCreateRouterState();
+    const registryA = {
+      getAvailable: () => [{ id: 'm-a', name: 'm-a', provider: 'provider-a', api: 'openai-completions' }],
+    };
+    const registryB = {
+      getAvailable: () => [{ id: 'm-b', name: 'm-b', provider: 'provider-b', api: 'openai-completions' }],
+    };
+
+    const mapA1 = __testRunWithRouterState(stateA, () => __testGetCachedModelMap(registryA));
+    const mapB1 = __testRunWithRouterState(stateB, () => __testGetCachedModelMap(registryB));
+    const mapA2 = __testRunWithRouterState(stateA, () => __testGetCachedModelMap(registryA));
+
+    expect(mapA1).toBe(mapA2);
+    expect(mapA1.has('m-a@provider-a')).toBe(true);
+    expect(mapA1.has('m-b@provider-b')).toBe(false);
+    expect(mapB1.has('m-b@provider-b')).toBe(true);
+    expect(mapB1.has('m-a@provider-a')).toBe(false);
+  });
+
   it('moves the last successful sticky channel to the front of configured order', () => {
     const state = __testGetInternalState();
     state.activeChannels.set('m1', 'Provider-B');
@@ -238,6 +262,43 @@ describe('routing state helpers', () => {
       { id: 'claude-opus-4-8', channels: ['anthropic', 'local'], sortBy: 'cost' } as any,
       {} as any,
     )).toEqual(['local', 'anthropic']);
+  });
+
+  it('sorts capabilityFirst routes by the actual upstream model capability', () => {
+    expect(determineChannelOrder(
+      'gpt-router',
+      {
+        id: 'gpt-router',
+        channels: ['provider-a', 'provider-b', 'provider-c'],
+        routes: [
+          { channel: 'provider-a', model: 'gpt-4' },
+          { channel: 'provider-b', model: 'gpt-5.5' },
+          { channel: 'provider-c', model: 'gpt-4o' },
+        ],
+        sortBy: 'capabilityFirst',
+      } as any,
+      {} as any,
+    )).toEqual([
+      'provider-b#gpt-5.5',
+      'provider-c#gpt-4o',
+      'provider-a#gpt-4',
+    ]);
+  });
+
+  it('keeps config order for capabilityFirst routes with no capability data', () => {
+    expect(determineChannelOrder(
+      'custom-router',
+      {
+        id: 'custom-router',
+        channels: ['provider-a', 'provider-b'],
+        routes: [
+          { channel: 'provider-a', model: 'custom-a' },
+          { channel: 'provider-b', model: 'custom-b' },
+        ],
+        sortBy: 'capabilityFirst',
+      } as any,
+      {} as any,
+    )).toEqual(['provider-a#custom-a', 'provider-b#custom-b']);
   });
 
   it('records cooldowns on failure', () => {
@@ -307,6 +368,23 @@ describe('routing state helpers', () => {
     recordCircuitOutcome('m1', 'Provider-A', true);
     expect(circuit.state).toBe('closed');
     expect(circuit.failureCount).toBe(0);
+  });
+
+  it('allows only one request through a half-open circuit at a time', () => {
+    for (let i = 0; i < 5; i++) {
+      recordCircuitOutcome('m1', 'Provider-A', false);
+    }
+
+    const state = __testGetInternalState();
+    const circuit = state.circuits.get('m1@Provider-A')!;
+    circuit.nextRetryTime = Date.now() - 1;
+
+    expect(canAttemptChannel('m1', 'Provider-A')).toBe(true);
+    expect(circuit.state).toBe('half-open');
+    expect(canAttemptChannel('m1', 'Provider-A')).toBe(false);
+
+    recordCircuitOutcome('m1', 'Provider-A', false);
+    expect(circuit.state).toBe('open');
   });
 
   it('stores footer phase and renders attempted chain', () => {
@@ -1317,6 +1395,73 @@ describe('request and event helpers', () => {
       // drain stream
     }
     expect(attemptedProviders).toEqual(['cold']);
+  });
+
+  it('applies cooldown admission to fallback routes using the same route identity', async () => {
+    const attemptedProviders: string[] = [];
+
+    registerApiProvider({
+      api: 'pi-router-fallback-cooldown-test-api',
+      stream: (() => createAssistantMessageEventStream()) as any,
+      streamSimple: (model) => {
+        attemptedProviders.push(model.provider);
+        const stream = createAssistantMessageEventStream();
+        queueMicrotask(() => {
+          const message = {
+            role: 'assistant',
+            content: [{ type: 'text', text: model.provider }],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 1,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: model.provider === 'primary' ? 'error' : 'stop',
+            timestamp: Date.now(),
+          } as any;
+
+          if (model.provider === 'primary') {
+            stream.push({ type: 'error', reason: 'error', error: { ...message, errorMessage: 'primary failed' } } as any);
+          } else {
+            stream.push({ type: 'text_delta', contentIndex: 0, delta: model.provider, partial: message } as any);
+            stream.push({ type: 'done', reason: 'stop', message } as any);
+          }
+          stream.end();
+        });
+        return stream;
+      },
+    } as any, 'pi-router-fallback-cooldown-test');
+
+    __testGetInternalState().cooldowns.set('fb@fb1', Date.now() + 60_000);
+
+    const stream = createFailoverStream(
+      'm1',
+      ['primary'],
+      { messages: [] } as any,
+      undefined,
+      { contextTransfer: 'full' } as any,
+      {
+        id: 'm1',
+        channels: ['primary'],
+        fallbackModels: [{ id: 'fb', channels: ['fb1', 'fb2'] }],
+      } as any,
+      new Map([
+        ['m1@primary', { id: 'm1', name: 'm1', provider: 'primary', api: 'pi-router-fallback-cooldown-test-api' }],
+        ['fb@fb1', { id: 'fb', name: 'fb', provider: 'fb1', api: 'pi-router-fallback-cooldown-test-api' }],
+        ['fb@fb2', { id: 'fb', name: 'fb', provider: 'fb2', api: 'pi-router-fallback-cooldown-test-api' }],
+      ]) as any,
+    );
+
+    for await (const _event of stream) {
+      // drain stream
+    }
+
+    expect(attemptedProviders).toEqual(['primary', 'fb2']);
   });
 
   it('summarizes context before switching to a fallback model when needed', async () => {

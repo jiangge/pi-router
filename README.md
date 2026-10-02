@@ -61,6 +61,7 @@ The wizard walks through:
 
 1. Routing strategy (`channelFirst` / `custom`)
 2. Sort strategy (`latency` / `capabilityFirst` / `cost` / `manual`)
+   - `capabilityFirst` ranks by the actual upstream model configured for each route; unknown or tied models keep their configured order.
 3. Auto-sync (`enable` recommended / `disable`)
 4. Health probe (`disabled` recommended / `10 minutes`)
 5. Sticky mode (`enable` / `disable`)

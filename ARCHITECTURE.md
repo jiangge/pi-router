@@ -74,6 +74,17 @@ Located at `~/.pi/agent/pi-router.json` by default, or under the directory selec
 
 ## Architecture Components
 
+### Core Runtime Modules
+
+The request data plane is split from extension wiring:
+
+- `core/route-executor.ts`: shared admission, dispatch, relay outcome and reliability bookkeeping for normal, auto and fallback routes
+- `core/stream-relay.ts`: timeout, abort propagation and the stream commit barrier
+- `core/failure-classifier.ts`: structured failure taxonomy and cooldown selection for auth, transport, timeout, rate-limit and provider failures
+- `core/atomic-file.ts`: same-directory temporary write plus atomic rename for config replacement
+- `reliability/circuit-breaker.ts`: closed/open/half-open state machine with single-flight recovery admission
+- `index.ts`: extension lifecycle, provider/model resolution, configuration, UI/commands and dependency binding for the core runtime
+
 ### Request Flow
 
 ```
@@ -97,13 +108,15 @@ Located at `~/.pi/agent/pi-router.json` by default, or under the directory selec
                       ↓
 ┌─────────────────────────────────────────────────────┐
 │ 4. createFailoverStream()                           │
-│    - tryNextChannel() loop:                         │
+│    - Resolve route candidates                       │
+│    - executeRouteAttempt() for every attempt        │
 │      • Check cooldown                               │
-│      • Check circuit breaker                        │
+│      • Acquire circuit-breaker admission            │
 │      • forwardToProvider() → pi-ai streamSimple     │
-│      • On error: record failure, try next           │
-│    - On all all channels failed:                              │
-│      • tryModelFallback()                         │
+│      • relayProviderStream() commit barrier         │
+│      • Record latency / health / failures / circuit │
+│    - On all channels failed:                        │
+│      • tryModelFallback() uses same executor        │
 └─────────────────────────────────────────────────────┘
                       ↓
 ┌─────────────────────────────────────────────────────┐
@@ -123,7 +136,7 @@ Decides channel priority based on:
    - `config`: Use config file order
    - `latency`: Sort by measured time-to-first-token
    - `cost`: Sort by provider pricing
-   - `capabilityFirst`: Prefer higher-capability providers
+   - `capabilityFirst`: Prefer routes targeting higher-capability upstream models; unknown/tied models preserve config order
 
 #### **forwardToProvider()**
 Converts router's `PiModel` to pi-ai's `Model<Api>` format and forwards:
@@ -139,19 +152,28 @@ return streamSimple(realModel, context, options);
 
 #### **createFailoverStream()**
 Returns `AssistantMessageEventStream` that:
-1. Tries channels in determined order
-2. Skips channels in cooldown or with open circuit breaker
-3. Records latency on first event
-4. Catches stream errors and failovers transparently
-5. Falls back to fallback models when all channels exhausted
+1. Resolves configured routes in determined order
+2. Sends each route through the shared `executeRouteAttempt()` boundary
+3. Preserves commit safety: failover is allowed only before user-visible output commits
+4. Records route-scoped latency, health, cooldown and circuit state
+5. Falls back to fallback models when all primary routes are exhausted
+
+#### **executeRouteAttempt()**
+Shared data-plane executor used by normal routing, `router/auto`, and model fallback:
+1. Check route cooldown
+2. Acquire circuit-breaker admission
+3. Dispatch to the resolved upstream provider/model
+4. Relay the stream through the commit barrier
+5. Record success/failure state with the same route identity
+6. Release half-open probe ownership on abort or committed-stream failure
 
 #### **tryModelFallback()**
 Handles cross-model failover:
 1. Iterate through fallback models
-2. Generate context summary (if `contextTransfer: "summary"`)
+2. Generate context summary when required by the target context window
 3. Call `sanitizeContextForSwitch()` for compatibility
-4. Forward to fallback model
-5. Continue to next fallback if fails
+4. Execute each fallback route through `executeRouteAttempt()`
+5. Continue to the next fallback route if admission or dispatch fails
 
 ---
 
@@ -164,12 +186,13 @@ Handles cross-model failover:
 **States**:
 - **Closed**: Normal operation, allow all requests
 - **Open**: Channel broken, block requests for 2 minutes
-- **Half-Open**: Testing recovery, allow one probe request
+- **Half-Open**: Testing recovery, allow exactly one in-flight probe request
 
 **Logic**:
 - Open circuit after **5 consecutive failures**
 - Reset timeout: **2 minutes**
 - Automatic recovery testing via half-open state
+- Half-open admission is single-flight; concurrent requests remain blocked until the probe resolves
 
 **Integration**: `canAttemptChannel()` called before each attempt
 
@@ -182,6 +205,11 @@ Handles cross-model failover:
 - Default: **60 seconds** (configurable per-model or globally)
 - Channel skipped during cooldown period
 - Independent from circuit breaker (different time scales)
+- Transient credential-resolution failures, network transport failures and timeouts use a **5 second** cooldown; permanent auth failures keep the configured cooldown
+
+### Configuration Writes
+
+`pi-router.json` is replaced atomically: the new JSON is written to a temporary file in the same directory and then renamed over the destination. This prevents an interrupted write from leaving a partially written primary config file.
 
 ### Health Monitoring
 
@@ -193,7 +221,7 @@ Handles cross-model failover:
 - Reset to healthy on first success
 - Displayed in `/router explain`
 
-**Future**: Background health probes to detect recovery proactively
+**Background probes**: Optional periodic probes are implemented and disabled by default; real user traffic remains the source of truth for failover health.
 
 ### Latency Tracking
 
@@ -321,16 +349,23 @@ Preview differences between config and `models.json`
 ### RouterState
 ```typescript
 {
-  activeChannels: Map<string, string>;        // "modelId" → "channel"
-  cooldowns: Map<string, number>;             // "modelId@channel" → endTime
+  currentRouterConfig: RouterConfig | null;
+  configFileMtimeMs: number | null;
+  autoSyncChecked: boolean;
+  autoSyncConfig: RouterConfig | null;
+  cachedModelMap: Map<string, PiModel> | null;
+  activeChannels: Map<string, string>;        // "modelId" → routeKey
+  cooldowns: Map<string, number>;             // "modelId@routeKey" → endTime
   lastFailures: Map<string, FailureRecord[]>; // "modelId" → failures[]
 }
 ```
 
+Configuration lifecycle and registry-derived model-map state are session-scoped through the same `AsyncLocalStorage<RouterState>` boundary as route health and UI state. Process-level caches are reserved for immutable/file-backed catalog data that is invalidated by file identity/mtime.
+
 ### LatencyTracker
 ```typescript
 {
-  records: Map<string, LatencyRecord[]>; // "modelId@channel" → latencies[]
+  records: Map<string, LatencyRecord[]>; // "modelId@routeKey" → latencies[]
   maxRecords: 10;
 }
 ```
@@ -338,15 +373,15 @@ Preview differences between config and `models.json`
 ### HealthChecker
 ```typescript
 {
-  status: Map<string, HealthCheckStatus>; // "modelId@channel" → status
-  enabled: false; // Will enable in v0.2 with background probes
+  status: Map<string, HealthCheckStatus>; // "modelId@routeKey" → status
+  enabled: false; // Background probes are optional and disabled by default
 }
 ```
 
 ### CircuitBreaker
 ```typescript
 {
-  circuits: Map<string, CircuitBreakerStatus>; // "modelId@channel" → status
+  circuits: Map<string, CircuitBreakerStatus>; // "modelId@routeKey" → status
   failureThreshold: 5;
   resetTimeoutMs: 120000;
   enabled: true;
@@ -364,36 +399,26 @@ Preview differences between config and `models.json`
 
 ---
 
-## Future Enhancements (v0.2+)
+## Future Enhancements
 
-### 1. Background Health Probes
-- Periodic lightweight requests to check channel availability
-- Detect recovery without waiting for user request
-- Update circuit breaker state proactively
-
-### 2. Per-Channel Pricing
+### 1. Per-Channel Pricing
 - Fine-grained cost data per provider
 - Real cost-based sorting (currently assumes uniform pricing per model)
 
-### 3. Latency-Based Adaptive Routing
+### 2. Latency-Based Adaptive Routing
 - Dynamic threshold: prefer faster channel if latency diff > X%
 - Time-of-day patterns (some providers slower at peak hours)
 
-### 4. Decision Analytics
+### 3. Decision Analytics
 - Aggregate statistics over time
 - Failure pattern detection
 - Strategy effectiveness comparison
 
-### 5. Inline Fallback Mode
+### 4. Inline Fallback Mode
 - Currently only `'switch'` mode (replace model)
 - Add `'inline'`: show both responses (primary + fallback)
 
-### 6. Real Summary Generation
-- Currently placeholder
-- Connect to actual cheap model (e.g., gemini-flash)
-- Token counting and cost tracking
-
-### 7. Config Presets
+### 5. Config Presets
 - Common patterns: `"mode": "reliability"`, `"mode": "cost"`, `"mode": "speed"`
 - Auto-generate optimal config based on use case
 
@@ -500,22 +525,13 @@ Preview differences between config and `models.json`
 
 ## Version History
 
-### v0.1.0-alpha (Current)
-- ✅ L1 channel failover
-- ✅ fallback model fallback with context transfer
-- ✅ Sticky mode for cache preservation
-- ✅ Latency tracking and sorting
-- ✅ Circuit breaker (fast-fail)
-- ✅ Health monitoring
-- ✅ Decision logger
-- ✅ Cooldown mechanism
-- ✅ Full command set (/router status/list/explain/decisions/sync/diff)
-
-### v0.2.0 (Planned)
-- Background health probes
-- Per-channel pricing
-- Real AI summary generation
-- Decision analytics
-- Config presets
-- Unit tests
-- Integration tests
+### v0.5.7 (Current)
+- ✅ Channel failover and model fallback with context transfer
+- ✅ Shared route executor for normal, auto, and fallback attempts
+- ✅ Route-scoped cooldown, latency, health, sticky and circuit state
+- ✅ Half-open circuit breaker with single-flight recovery probe
+- ✅ Stream commit barrier prevents failover after user-visible output begins
+- ✅ Background health probes and AI-assisted summary generation
+- ✅ Session-scoped runtime state via `AsyncLocalStorage`
+- ✅ Routing registry/cache-hint integration protocols
+- ✅ Unit and runtime integration coverage
