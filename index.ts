@@ -2767,7 +2767,9 @@ function initializeRouterExtension(pi: ExtensionAPI, sessionState: RouterState) 
         ];
         
         const secondPart = (parts[1] || '').toLowerCase();
-        const filtered = configSubcommands.filter(cmd => cmd.value.startsWith(secondPart));
+        const filtered = configSubcommands
+          .filter(cmd => cmd.value.startsWith(secondPart))
+          .map(cmd => ({ ...cmd, value: `${parts[0]} ${cmd.value}` }));
         
         return filtered.length > 0 ? filtered : null;
       }
@@ -2781,7 +2783,9 @@ function initializeRouterExtension(pi: ExtensionAPI, sessionState: RouterState) 
           { value: "auto", label: "auto", description: "Reset the auto chain" },
           ...(currentConfig.models || []).map(m => ({ value: m.id, label: m.id, description: `Reset router/${m.id}` })),
         ];
-        const filtered = items.filter(cmd => cmd.value.toLowerCase().startsWith(secondPart));
+        const filtered = items
+          .filter(cmd => cmd.value.toLowerCase().startsWith(secondPart))
+          .map(cmd => ({ ...cmd, value: `${parts[0]} ${cmd.value}` }));
         
         return filtered.length > 0 ? filtered : null;
       }
