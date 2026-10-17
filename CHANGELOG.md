@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-10-17
+
+### Fixed
+
+- Preserved parent arguments when completing nested `/router config` and `/router reset` commands.
+
+### Tests
+
+- Added end-to-end autocomplete regression coverage for nested commands, aliases, reset targets, cursor positioning, and unmatched prefixes.
+
 ## [0.5.7] - 2026-10-03
 
 ### Fixed
