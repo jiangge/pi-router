@@ -96,6 +96,9 @@ function resolvePiDependencyRoot(packageName: string): string {
 
 const piAiRoot = resolvePiDependencyRoot('@earendil-works/pi-ai');
 const piTuiRoot = resolvePiDependencyRoot('@earendil-works/pi-tui');
+const piVersion = JSON.parse(readFileSync(path.join(piRoot, 'package.json'), 'utf8')).version as string;
+
+console.log(`[pi-router tests] Using Pi ${piVersion} from ${piRoot}`);
 
 export default defineConfig({
   resolve: {
@@ -129,6 +132,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    setupFiles: ['./tests/setup-pi-agent.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

@@ -35,8 +35,10 @@ jobs:
           fi
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
-      - name: Install Pi for integration tests
-        run: npm install --global @earendil-works/pi-coding-agent@0.87.1
+      - name: Install Pi for compatibility checks
+        run: npm install --global @earendil-works/pi-coding-agent@1.3.0
+      - name: Typecheck against installed Pi
+        run: PI_ROUTER_TEST_PI_ROOT="$(npm root --global)/@earendil-works/pi-coding-agent" npm run typecheck:pi
       - name: Run tests with installed Pi
         run: PI_ROUTER_TEST_PI_ROOT="$(npm root --global)/@earendil-works/pi-coding-agent" npm test
       - run: npm publish --provenance --access public

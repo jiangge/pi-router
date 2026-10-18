@@ -407,6 +407,22 @@ A successful test should demonstrate:
 - ✅ Cost-based sorting prefers cheaper channels
 - ✅ Commands provide useful observability
 
+## Compatibility Checks (development)
+
+Run the suite against the Pi installed on this machine. Without `PI_ROUTER_TEST_PI_ROOT`, the tests use the first `pi` executable on `PATH`; the run logs the resolved Pi version.
+
+```bash
+npm run typecheck        # project-only check; host peers resolve to any
+
+PI_ROUTER_TEST_PI_ROOT="$(npm root --global)/@earendil-works/pi-coding-agent" \
+  npm run typecheck:pi  # type-check against the host's real Pi declarations
+
+PI_ROUTER_TEST_PI_ROOT="$(npm root --global)/@earendil-works/pi-coding-agent" \
+  npm test
+```
+
+`typecheck:pi` maps `@earendil-works/pi-*` to the installed Pi package and fails on API changes that a plain `tsc --noEmit` cannot see. Tests write only to temporary agent directories, so they never touch your real `~/.pi/agent` credentials or models.
+
 ## Reporting Issues
 
 When reporting bugs, include:

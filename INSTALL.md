@@ -64,7 +64,7 @@ Or create configuration file manually at `~/.pi/agent/pi-router.json`:
 
 See `examples/router.config.json` for all available options.
 
-This development version targets pi `0.84.4+` and Node.js `22.19+`. pi-router uses the runtime API supplied by the running pi host, including pi's own `getAgentDir()` implementation, so custom agent directories stay aligned with pi. The package does not install the pi CLI or any Pi core runtime package into the extension project; `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, and `@earendil-works/pi-tui` are host-provided optional peers.
+This development version targets pi `0.84.4+` through Pi `1.x` (verified with `1.3.0`) and Node.js `22.19+`. pi-router uses the runtime API supplied by the running pi host, including pi's own `getAgentDir()` implementation, so custom agent directories stay aligned with pi. The package does not install the pi CLI or any Pi core runtime package into the extension project; `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, and `@earendil-works/pi-tui` are host-provided optional peers.
 
 ---
 

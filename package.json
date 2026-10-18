@@ -59,9 +59,9 @@
     "node": ">=22.19.0"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.84.4",
-    "@earendil-works/pi-ai": ">=0.84.4",
-    "@earendil-works/pi-tui": ">=0.84.4"
+    "@earendil-works/pi-coding-agent": ">=0.84.4 <2.0.0",
+    "@earendil-works/pi-ai": ">=0.84.4 <2.0.0",
+    "@earendil-works/pi-tui": ">=0.84.4 <2.0.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
@@ -84,6 +84,7 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
+    "typecheck:pi": "node scripts/typecheck-pi.mjs",
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",

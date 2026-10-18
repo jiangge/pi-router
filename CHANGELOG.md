@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Compatibility
+
+- Verified with Pi `1.3.0` without runtime code changes: extension loading, `/router` registration, model discovery, routed requests, and channel failover work through Pi 1.3.0's `ModelRuntime` and bundled `pi-ai`; the full test suite passes against the installed host.
+- Added `npm run typecheck:pi`, which resolves the host's Pi packages and type-checks the extension against their real declarations. Plain `npm run typecheck` treats the host-provided peers as `any`, so it cannot detect Pi API changes.
+- Updated the release workflow to test and type-check against Pi `1.3.0` instead of `0.87.1`.
+- Bounded the Pi peer dependency range with `<2.0.0` while keeping the `0.84.4` floor.
+- Isolated tests from the developer's real Pi agent directory so `auth.json`, `models.json`, and lock files cannot change test results.
+
 ## [0.5.8] - 2026-10-17
 
 ### Fixed

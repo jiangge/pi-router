@@ -52,7 +52,7 @@ function applyPendingProviders(runtime: ModelRuntime, loaded: Awaited<ReturnType
   loaded.runtime.pendingProviderRegistrations = [];
 }
 
-describe('Pi 0.84 ModelRuntime integration', () => {
+describe('Pi ModelRuntime integration', () => {
   it('selects router/auto before session_start when the upstream provider catalog is runtime-only', async () => {
     createConfigDir();
     const eventBus = createEventBus();
