@@ -642,20 +642,15 @@ describe('provider registration helpers', () => {
   });
 
   it('expands modelOverrides-based providers such as openai-codex', () => {
+    // Host catalogs evolve independently of router. Test inheritance, not a retired ID.
+    const builtin = expandProviderModels('openai-codex', {})[0];
+    expect(builtin).toBeDefined();
     const models = expandProviderModels('openai-codex', {
-      modelOverrides: {
-        'gpt-5.5': {
-          name: 'GPT-5.5 (high)',
-        },
-      },
+      modelOverrides: { [builtin.id]: { name: 'Override (high)' } },
     });
-
     expect(models).toHaveLength(1);
     expect(models[0]).toMatchObject({
-      id: 'gpt-5.5',
-      provider: 'openai-codex',
-      api: 'openai-codex-responses',
-      name: 'GPT-5.5 (high)',
+      id: builtin.id, provider: 'openai-codex', api: builtin.api, name: 'Override (high)',
     });
     expect(models[0].baseUrl).toBeTruthy();
   });

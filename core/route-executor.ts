@@ -10,7 +10,7 @@ import {
 } from "./stream-relay.js";
 
 export type RouteAttemptExecutionResult =
-  | { status: "skipped"; reason: "cooldown" | "circuit" }
+  | { status: "skipped"; reason: "cooldown" | "circuit" | "capability" }
   | { status: "succeeded"; latencyMs: number }
   | { status: "failed"; error: string; aborted: boolean; committed: boolean };
 

@@ -172,7 +172,11 @@ type PiCacheHintsV1 = {
   } | undefined;
 };
 
+import { orderEconomicRoutes, routeIncompatibility, type RoutingPolicy, type RouteMetadata } from './core/routing-policy.js';
+
 type RouterConfig = {
+  routingPolicy?: RoutingPolicy;
+  routeMetadata?: Record<string, RouteMetadata>;
   strategy?: "channelFirst" | "custom";
   auto?: boolean;
   sortBy?: "manual" | "capabilityFirst" | "costFirst" | "latency" | "cost";
@@ -421,7 +425,7 @@ function estimateRequestCost(
 ): number {
   const pricing = getChannelPricing(modelId, channel);
   if (!pricing) {
-    return 0;
+    return Infinity; // Unknown is never free.
   }
   
   const cost =
@@ -1510,6 +1514,8 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
     _comment_1: "Pi-Router 配置文件。可手动编辑；也可运行 /router config wizard 重新生成。",
     _comment_2: `配置文件路径: ${getRouterConfigPath()}；修改后运行 /reload 或重启 pi 生效。`,
     _comment_strategy: "路由策略: channelFirst(通道优先) / custom(自定义顺序)",
+    ...(config.routingPolicy ? { routingPolicy: config.routingPolicy } : {}),
+    ...(config.routeMetadata ? { routeMetadata: config.routeMetadata } : {}),
     strategy: config.strategy ?? "channelFirst",
     _comment_auto: "是否注册 router/auto 并在无 models 时自动发现多通道模型",
     auto: config.auto ?? true,
@@ -4316,6 +4322,13 @@ type ExecuteRouteAttemptParams = CoreExecuteRouteAttemptParams<PiModel, RouterMo
 
 /** Bind the reusable route executor to pi-router's session state and metrics. */
 function executeRouteAttempt(params: ExecuteRouteAttemptParams): Promise<RouteAttemptExecutionResult> {
+  if (params.config.routingPolicy?.enabled) {
+    const reason = routeIncompatibility(params.route.model, params.context, params.options, estimateContextTokens(params.context));
+    if (reason) {
+      debugLog(`[pi-router] Skipping ${params.route.routeKey}: ${reason}`);
+      return Promise.resolve({ status: 'skipped', reason: 'capability' });
+    }
+  }
   return executeRouteAttemptCore<PiModel, RouterModelConfig, RouterConfig>(params, {
     getCooldownEnd: (stateModelId, routeKey) => getRouterState().cooldowns.get(getRouteStateKey(stateModelId, routeKey)),
     canAttempt: canAttemptChannel,
@@ -4706,7 +4719,7 @@ function determineRouteOrder(
   modelConfig: RouterModelConfig,
   config: RouterConfig
 ): RouterRouteEntry[] {
-  const routes = [...getModelRouteEntries(modelConfig)];
+  let routes = [...getModelRouteEntries(modelConfig)];
 
   // If sticky mode and we have an active route, try it first. activeChannels
   // stores a routeKey for new configs and a channel name for legacy configs.
@@ -4714,22 +4727,19 @@ function determineRouteOrder(
     const activeRouteKey = getRouterState().activeChannels.get(modelId);
     const activeRoute = routes.find(route => route.routeKey === activeRouteKey || route.channel === activeRouteKey);
     if (activeRoute) {
+      debugLog(`[pi-router] Keeping legacy sticky ${modelId}@${activeRoute.routeKey}; overrides policy/sort`);
       const activeSignature = getRouteSignature(activeRoute);
       return [activeRoute, ...routes.filter(route => getRouteSignature(route) !== activeSignature)];
     }
   }
 
   const sortBy = modelConfig.sortBy || config.sortBy || "config";
-  if (sortBy === "latency") {
-    return sortRoutesByLatency(modelId, routes);
-  }
-  if (sortBy === "cost" || sortBy === "costFirst") {
-    return sortRoutesByCost(modelId, routes);
-  }
-  if (sortBy === "capabilityFirst") {
-    return sortRoutesByCapability(modelId, routes);
-  }
-  return routes;
+  if (sortBy === "latency") routes = sortRoutesByLatency(modelId, routes);
+  if (sortBy === "cost" || sortBy === "costFirst") routes = sortRoutesByCost(modelId, routes);
+  if (sortBy === "capabilityFirst") routes = sortRoutesByCapability(modelId, routes);
+  const result = orderEconomicRoutes(routes, config.routeMetadata ?? {}, config.routingPolicy ?? {}, Date.now());
+  if (config.routingPolicy?.enabled) debugLog(`[pi-router] Policy ${modelId}: ${result.reason}`);
+  return result.routes;
 }
 
 function routeEntriesFromOrder(modelConfig: RouterModelConfig, order: string[]): RouterRouteEntry[] {
