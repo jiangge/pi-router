@@ -4,9 +4,10 @@ import type {
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 
+import { structuredFailure, type FailureClassification } from './failure-classifier.js';
 export type RelayProviderStreamResult =
   | { ok: true }
-  | { ok: false; error: string; aborted: boolean; committed: boolean };
+  | { ok: false; error: string; aborted: boolean; committed: boolean; details?: FailureClassification };
 
 const providerStreamAborters = new WeakMap<AssistantMessageEventStream, () => void>();
 
@@ -139,7 +140,10 @@ export async function relayProviderStream(
 
       const event = result.value;
       const failure = getStreamEventFailure(event);
-      if (failure) throw new Error(failure);
+      if (failure) {
+        const source = (event as any).error;
+        throw Object.assign(new Error(failure), { status: source?.status, code: source?.code, headers: source?.headers });
+      }
 
       if (!committed) {
         if (isResponseCommitEvent(event)) {
@@ -165,6 +169,7 @@ export async function relayProviderStream(
       error,
       aborted: isAbortError(error) || isAbortSignalAborted(options),
       committed,
+      details: structuredFailure(err),
     };
   }
 }

@@ -3,6 +3,8 @@ export type FailureKind =
   | "network"
   | "timeout"
   | "rate-limit"
+  | "quota-exhausted"
+  | "credit-exhausted"
   | "auth"
   | "abort"
   | "provider"
@@ -11,7 +13,27 @@ export type FailureKind =
 export type FailureClassification = {
   kind: FailureKind;
   retryable: boolean;
+  retryAt?: number;
+  status?: number;
 };
+
+/** Only structured provider fields are accepted as reset hints; never infer balances from usage. */
+export function structuredFailure(error: unknown, now = Date.now()): FailureClassification {
+  const e = error as any;
+  const base = classifyFailure(typeof error === 'string' ? error : e?.message ?? String(error));
+  const status = Number(e?.status ?? e?.statusCode);
+  const raw = e?.headers?.get?.('retry-after') ?? e?.headers?.['retry-after'];
+  const seconds = typeof raw === 'string' && /^\\d+(?:\\.\\d+)?$/.test(raw) ? Number(raw) : undefined;
+  const date = typeof raw === 'string' ? Date.parse(raw) : NaN;
+  const retryAt = seconds !== undefined ? now + seconds * 1000 : date;
+  const code = e?.code ?? e?.error?.code;
+  return { ...base,
+    ...(code === 'insufficient_quota' ? { kind: 'quota-exhausted' as const, retryable: false } : {}),
+    ...(code === 'insufficient_credits' ? { kind: 'credit-exhausted' as const, retryable: false } : {}),
+    ...(Number.isInteger(status) && status >= 100 && status <= 599 ? {status} : {}),
+    ...(Number.isFinite(retryAt) && retryAt > now ? {retryAt: Math.min(retryAt,now + 86400000)} : {}),
+  };
+}
 
 export function classifyFailure(error: string): FailureClassification {
   const text = error || "";
@@ -46,6 +68,9 @@ export function classifyFailure(error: string): FailureClassification {
   ) {
     return { kind: "auth", retryable: false };
   }
+
+  if (/insufficient_quota|quota exhausted|usage limit reached/i.test(text)) return {kind:'quota-exhausted',retryable:false};
+  if (/insufficient_credits|credit balance.*(?:low|exhausted)|insufficient balance/i.test(text)) return {kind:'credit-exhausted',retryable:false};
 
   if (
     statusCode === "429" ||

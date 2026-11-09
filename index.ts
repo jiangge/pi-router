@@ -173,6 +173,9 @@ type PiCacheHintsV1 = {
 };
 
 import { orderEconomicRoutes, routeIncompatibility, type RoutingPolicy, type RouteMetadata } from './core/routing-policy.js';
+import { RouteAffinity, type AffinityConfig } from './core/affinity.js';
+import { FailoverBudget, type FailoverBudgetConfig } from './core/failover-budget.js';
+import { classifyFailure, type FailureClassification } from './core/failure-classifier.js';
 
 type RouterConfig = {
   routingPolicy?: RoutingPolicy;
@@ -196,6 +199,8 @@ type RouterConfig = {
   modelAliases?: Record<string, string[]>;
   customOrder?: string[];  // For custom strategy: array of "modelId@channel" strings
   customRoutes?: RouterCustomRouteConfig[];  // For duplicate provider/model-variant routes in custom strategy
+  failoverBudget?: FailoverBudgetConfig;
+  affinity?: AffinityConfig;
   failover?: {
     on?: string[];
     cooldownMs?: number;
@@ -1516,6 +1521,8 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
     _comment_strategy: "路由策略: channelFirst(通道优先) / custom(自定义顺序)",
     ...(config.routingPolicy ? { routingPolicy: config.routingPolicy } : {}),
     ...(config.routeMetadata ? { routeMetadata: config.routeMetadata } : {}),
+    ...(config.affinity ? { affinity: config.affinity } : {}),
+    ...(config.failoverBudget ? { failoverBudget: config.failoverBudget } : {}),
     strategy: config.strategy ?? "channelFirst",
     _comment_auto: "是否注册 router/auto 并在无 models 时自动发现多通道模型",
     auto: config.auto ?? true,
@@ -2629,6 +2636,12 @@ function initializeRouterExtension(pi: ExtensionAPI, sessionState: RouterState) 
 
   // Remember the active UI context so routing code can update the footer during
   // the same turn, not only at the next turn_start.
+  on('before_agent_start', async (event) => {
+    if (event.messageType === 'user') getRouterState().affinity.beginUserTurn();
+  });
+  on('session_tree', async () => {
+    getRouterState().affinity.clear();
+  });
   on("session_start", async (_event, ctx) => {
     debugLog(`[pi-router] session_start received (modelRegistry=${ctx?.modelRegistry ? "present" : "missing"})`);
     let currentConfig = refreshConfigFromDisk(config);
@@ -2929,6 +2942,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     let totalFailures = 0;
     for (const [modelId, failures] of getRouterState().lastFailures.entries()) {
       const recent = failures.slice(-10);
+      for (const f of recent) if (f.classification) lines.push(`  ${modelId}@${f.channel}: ${f.classification.kind}; retryable=${f.classification.retryable}; retryAt=${f.classification.retryAt ?? 'unknown'}`);
       totalFailures += recent.length;
       recent.forEach(f => {
         const ago = Math.floor((now - f.timestamp) / 1000);
@@ -3676,9 +3690,11 @@ ${summary}` }];
 type RouterStatusPhase = "trying" | "success" | "failed" | "fallback" | "aborted";
 
 type RouterState = {
+  affinity: RouteAffinity;
+  budgets: WeakMap<AssistantMessageEventStream, FailoverBudget>;
   activeChannels: Map<string, string>;  // modelId -> current active routeKey
   cooldowns: Map<string, number>;  // "modelId@routeKey" -> cooldown end timestamp
-  lastFailures: Map<string, { channel: string; error: string; timestamp: number }[]>;  // modelId -> failure history
+  lastFailures: Map<string, { channel: string; error: string; timestamp: number; classification?: FailureClassification }[]>;  // modelId -> failure history
   currentRouterConfig: RouterConfig | null;
   configFileMtimeMs: number | null;
   autoSyncChecked: boolean;
@@ -3733,6 +3749,8 @@ type RouterState = {
 
 function createRouterState(): RouterState {
   return {
+    affinity: new RouteAffinity(),
+    budgets: new WeakMap(),
     activeChannels: new Map(),
     cooldowns: new Map(),
     lastFailures: new Map(),
@@ -4145,7 +4163,12 @@ function routeAutoMode(
   debugLog(`[pi-router] Auto mode: trying ${configuredModels.length} models`);
   
   // Check sticky record first
-  const stickyRecord = config.stickyRecords?.["auto"];
+  const affinity = config.affinity?.mode && config.affinity.mode !== 'legacy'
+    ? getRouterState().affinity.select('auto', config.affinity, Date.now()) : undefined;
+  if (affinity) debugLog(`[pi-router] Auto affinity: ${affinity.reason}`);
+  const stickyRecord: StickyRecord | undefined = affinity
+    ? (affinity.record && config.sticky !== false ? { ...affinity.record, successCount: 1, lastSuccess: affinity.record.since, lastUpdate: affinity.record.since } : undefined)
+    : config.stickyRecords?.["auto"];
   if (stickyRecord && config.sticky !== false) {
     debugLog(`[pi-router] Auto mode: sticky hint ${stickyRecord.modelId}@${stickyRecord.channel}`);
   }
@@ -4173,7 +4196,7 @@ function getRouteStateKey(modelId: string, routeKey: string): string {
  * Update sticky record on successful route
  */
 function updateStickyRecord(routerModelId: string, modelId: string, channel: string, config: RouterConfig, routeKey = channel, upstreamModelId?: string): void {
-  if (config.sticky === false) return;
+  if (config.sticky === false || (config.affinity?.mode && config.affinity.mode !== 'legacy')) return;
   
   if (!config.stickyRecords) {
     config.stickyRecords = {};
@@ -4299,6 +4322,7 @@ function resetRoutingPointer(
     }
   }
 
+  getRouterState().affinity.clear();
   debugLog(`[pi-router] Pointer reset (scope=${scope}): sticky=${stickyCleared.join(",") || "none"}, cooldowns=${cooldownsCleared}, health=${healthReset}, circuits=${circuitsReset}, failures=${failuresCleared}`);
 
   return { scope, stickyCleared, activeChannelsCleared, cooldownsCleared, healthReset, circuitsReset, failuresCleared };
@@ -4321,7 +4345,36 @@ type ExecuteRouteAttemptParams = CoreExecuteRouteAttemptParams<PiModel, RouterMo
 };
 
 /** Bind the reusable route executor to pi-router's session state and metrics. */
-function executeRouteAttempt(params: ExecuteRouteAttemptParams): Promise<RouteAttemptExecutionResult> {
+function getRequestBudget(stream: AssistantMessageEventStream, config: RouterConfig): FailoverBudget | undefined {
+  if (!config.failoverBudget) return undefined;
+  let budget = getRouterState().budgets.get(stream);
+  if (!budget) {
+    const b = config.failoverBudget;
+    for (const value of [b.maxAttempts, b.maxTotalWaitMs]) {
+      if (value !== undefined && (!Number.isFinite(value) || value <= 0)) throw new Error('Invalid failover budget: limits must be positive finite numbers');
+    }
+    budget = new FailoverBudget(b);
+    getRouterState().budgets.set(stream, budget);
+  }
+  return budget;
+}
+
+async function executeRouteAttempt(params: ExecuteRouteAttemptParams): Promise<RouteAttemptExecutionResult> {
+  const budget = getRequestBudget(params.outputStream, params.config);
+  const exhausted = budget?.exhausted();
+  if (exhausted) {
+    debugLog(`[pi-router] ${exhausted}; stopping chain before dispatch`);
+    return { status: 'failed', error: exhausted, aborted: true, committed: false };
+  }
+  let effective = params;
+  if (budget && Number.isFinite(budget.remaining())) {
+    const remaining = Math.max(1, Math.min(2147483647, budget.remaining()));
+    const signal = params.options?.signal
+      ? AbortSignal.any([params.options.signal, AbortSignal.timeout(remaining)]) : AbortSignal.timeout(remaining);
+    effective = { ...params, options: { ...params.options, signal }, config: {
+      ...params.config, request: { ...params.config.request, timeoutMs: Math.min(getRouterTimeoutMs(params.options, params.config) || Infinity, remaining) },
+    } };
+  }
   if (params.config.routingPolicy?.enabled) {
     const reason = routeIncompatibility(params.route.model, params.context, params.options, estimateContextTokens(params.context));
     if (reason) {
@@ -4329,7 +4382,17 @@ function executeRouteAttempt(params: ExecuteRouteAttemptParams): Promise<RouteAt
       return Promise.resolve({ status: 'skipped', reason: 'capability' });
     }
   }
-  return executeRouteAttemptCore<PiModel, RouterModelConfig, RouterConfig>(params, {
+  const result = await executeRouteAttemptCore<PiModel, RouterModelConfig, RouterConfig>({
+    ...effective,
+    onAdmitted: () => { budget?.admit(); params.onAdmitted?.(); },
+    onSuccess: latency => {
+      if (params.config.affinity?.mode && params.config.affinity.mode !== 'legacy') {
+        getRouterState().affinity.success(params.virtualModelId, params.modelConfig.id, params.route.routeKey,
+          params.route.channel, params.config.affinity, Date.now(), params.options?.cacheRetention === 'long' || params.options?.cacheRetention === 'short');
+      }
+      params.onSuccess?.(latency);
+    },
+  }, {
     getCooldownEnd: (stateModelId, routeKey) => getRouterState().cooldowns.get(getRouteStateKey(stateModelId, routeKey)),
     canAttempt: canAttemptChannel,
     forward: forwardToProvider,
@@ -4341,6 +4404,10 @@ function executeRouteAttempt(params: ExecuteRouteAttemptParams): Promise<RouteAt
     releaseCircuit: releaseCircuitAttempt,
     debugLog: message => debugLog(`[pi-router] ${message}`),
   });
+  if (budget?.remaining() === 0 && result.status === 'failed') {
+    return { ...result, error: 'failover budget: total wait deadline reached', aborted: true };
+  }
+  return result;
 }
 
 async function relayAutoAttempt(
@@ -4723,13 +4790,18 @@ function determineRouteOrder(
 
   // If sticky mode and we have an active route, try it first. activeChannels
   // stores a routeKey for new configs and a channel name for legacy configs.
+  const v2 = config.affinity?.mode && config.affinity.mode !== 'legacy';
+  const affinity = v2 ? getRouterState().affinity.select(modelId, config.affinity, Date.now()) : undefined;
+  if (affinity) debugLog(`[pi-router] Affinity ${modelId}: ${affinity.reason}`);
   if (modelConfig.sticky !== false && config.sticky !== false) {
-    const activeRouteKey = getRouterState().activeChannels.get(modelId);
+    const activeRouteKey = v2 ? affinity?.record?.routeKey : getRouterState().activeChannels.get(modelId);
     const activeRoute = routes.find(route => route.routeKey === activeRouteKey || route.channel === activeRouteKey);
     if (activeRoute) {
-      debugLog(`[pi-router] Keeping legacy sticky ${modelId}@${activeRoute.routeKey}; overrides policy/sort`);
+      debugLog(`[pi-router] Keeping ${v2 ? 'scoped affinity' : 'legacy sticky'} ${modelId}@${activeRoute.routeKey}; overrides head ordering; health admission still required`);
       const activeSignature = getRouteSignature(activeRoute);
-      return [activeRoute, ...routes.filter(route => getRouteSignature(route) !== activeSignature)];
+      if (!v2) return [activeRoute, ...routes.filter(route => getRouteSignature(route) !== activeSignature)];
+      const tail = determineRouteOrder(modelId, { ...modelConfig, sticky: false }, config);
+      return [activeRoute, ...tail.filter(route => getRouteSignature(route) !== activeSignature)];
     }
   }
 
@@ -5351,7 +5423,8 @@ function recordFailure(
   channel: string,
   error: string,
   config: RouterConfig,
-  modelConfig: RouterModelConfig
+  modelConfig: RouterModelConfig,
+  details?: FailureClassification,
 ): void {
   const key = `${modelId}@${channel}`;
 
@@ -5363,7 +5436,10 @@ function recordFailure(
     channel,
     error,
     timestamp: Date.now(),
+    classification: details ?? classifyFailure(error),
   });
+  const history = getRouterState().lastFailures.get(modelId)!;
+  if (history.length > 50) history.splice(0, history.length - 50);
 
   // Raw upstream error (never the prettified user-facing string) so debug
   // logs show the real cause of a failover.
@@ -5373,7 +5449,8 @@ function recordFailure(
   const { cooldownMs, classification } = getFailureCooldownMs(error, configuredCooldownMs);
   debugLog(`[pi-router] Failure classified as ${classification.kind}; applying ${cooldownMs}ms cooldown`);
 
-  getRouterState().cooldowns.set(key, Date.now() + cooldownMs);
+  const retryAt = config.failoverBudget?.respectRetryAfter ? details?.retryAt : undefined;
+  getRouterState().cooldowns.set(key, Math.max(Date.now() + cooldownMs, retryAt ?? 0));
 
   debugLog(`[pi-router] Applied ${cooldownMs}ms cooldown to ${key}`);
 }
@@ -5520,7 +5597,12 @@ async function tryModelFallback(
         } else {
           debugLog(`[pi-router] Generating context summary for model switch...`);
           const summaryModel = resolveSummaryModel(config.summaryModel, modelMap, targetModel);
-          const summaryResult = await generateContextSummary(
+          const requestBudget = getRequestBudget(eventStream, config);
+          // Bounded failover must not spawn unbudgeted auxiliary LLM calls.
+          // Use deterministic text transfer rather than stacking another retry chain.
+          const summaryResult = requestBudget ? {
+            success: false, summary: generateSimpleTextSummary(context.messages || [], primaryModel, targetModel), tokensUsed: 0,
+          } : await generateContextSummary(
             context.messages || [],
             primaryModel,
             targetModel,

@@ -1,3 +1,4 @@
+import { structuredFailure, type FailureClassification } from './failure-classifier.js';
 import type {
   AssistantMessageEventStream,
   Context,
@@ -38,7 +39,7 @@ export type RouteAttemptDependencies<TModel, TModelConfig, TConfig> = {
     onCommit: () => void,
   ) => Promise<RelayProviderStreamResult>;
   recordLatency: (stateModelId: string, routeKey: string, latencyMs: number) => void;
-  recordFailure: (stateModelId: string, routeKey: string, error: string, config: TConfig, modelConfig: TModelConfig) => void;
+  recordFailure: (stateModelId: string, routeKey: string, error: string, config: TConfig, modelConfig: TModelConfig, details?: FailureClassification) => void;
   updateHealth: (stateModelId: string, routeKey: string, healthy: boolean) => void;
   recordCircuit: (stateModelId: string, routeKey: string, success: boolean) => void;
   releaseCircuit: (stateModelId: string, routeKey: string) => void;
@@ -98,7 +99,9 @@ export async function executeRouteAttempt<TModel, TModelConfig, TConfig>(
     if (aborted) {
       deps.releaseCircuit(stateModelId, routeKey);
     } else {
-      deps.recordFailure(stateModelId, routeKey, error, config, modelConfig);
+      const details = structuredFailure(err);
+      if (details.status !== undefined || details.retryAt !== undefined || (err as any)?.code) deps.recordFailure(stateModelId, routeKey, error, config, modelConfig, details);
+      else deps.recordFailure(stateModelId, routeKey, error, config, modelConfig);
       deps.updateHealth(stateModelId, routeKey, false);
       deps.recordCircuit(stateModelId, routeKey, false);
     }
@@ -125,7 +128,9 @@ export async function executeRouteAttempt<TModel, TModelConfig, TConfig>(
   if (aborted) {
     deps.releaseCircuit(stateModelId, routeKey);
   } else {
-    deps.recordFailure(stateModelId, routeKey, error, config, modelConfig);
+    const details = (relayResult as any).details as FailureClassification | undefined;
+    if (details && (details.status !== undefined || details.retryAt !== undefined || details.kind === 'quota-exhausted' || details.kind === 'credit-exhausted')) deps.recordFailure(stateModelId, routeKey, error, config, modelConfig, details);
+    else deps.recordFailure(stateModelId, routeKey, error, config, modelConfig);
     deps.updateHealth(stateModelId, routeKey, false);
     deps.recordCircuit(stateModelId, routeKey, false);
   }
