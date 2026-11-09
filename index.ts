@@ -173,11 +173,14 @@ type PiCacheHintsV1 = {
 };
 
 import { orderEconomicRoutes, routeIncompatibility, type RoutingPolicy, type RouteMetadata } from './core/routing-policy.js';
+import { AllowanceStore, orderAllowanceRoutes, type AllowanceConfig } from './core/allowance.js';
+import { OpenRouterAllowanceAdapter } from './core/openrouter-allowance.js';
 import { RouteAffinity, type AffinityConfig } from './core/affinity.js';
 import { FailoverBudget, type FailoverBudgetConfig } from './core/failover-budget.js';
 import { classifyFailure, type FailureClassification } from './core/failure-classifier.js';
 
 type RouterConfig = {
+  allowance?: AllowanceConfig;
   routingPolicy?: RoutingPolicy;
   routeMetadata?: Record<string, RouteMetadata>;
   strategy?: "channelFirst" | "custom";
@@ -1519,6 +1522,7 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
     _comment_1: "Pi-Router 配置文件。可手动编辑；也可运行 /router config wizard 重新生成。",
     _comment_2: `配置文件路径: ${getRouterConfigPath()}；修改后运行 /reload 或重启 pi 生效。`,
     _comment_strategy: "路由策略: channelFirst(通道优先) / custom(自定义顺序)",
+    ...(config.allowance ? { allowance: config.allowance } : {}),
     ...(config.routingPolicy ? { routingPolicy: config.routingPolicy } : {}),
     ...(config.routeMetadata ? { routeMetadata: config.routeMetadata } : {}),
     ...(config.affinity ? { affinity: config.affinity } : {}),
@@ -2642,7 +2646,12 @@ function initializeRouterExtension(pi: ExtensionAPI, sessionState: RouterState) 
   on('session_tree', async () => {
     getRouterState().affinity.clear();
   });
+  on('session_switch', async () => { getRouterState().affinity.clear(); });
+  on('session_fork', async () => { getRouterState().affinity.clear(); });
   on("session_start", async (_event, ctx) => {
+    getRouterState().affinity.clear();
+    getRouterState().allowance.close();
+    getRouterState().allowance = new AllowanceStore();
     debugLog(`[pi-router] session_start received (modelRegistry=${ctx?.modelRegistry ? "present" : "missing"})`);
     let currentConfig = refreshConfigFromDisk(config);
     fallbackRouterState = sessionState;
@@ -2695,6 +2704,7 @@ function initializeRouterExtension(pi: ExtensionAPI, sessionState: RouterState) 
   });
 
   on("session_shutdown", async () => {
+    getRouterState().allowance.close();
     clearSessionResources();
     restoreDefaultFooter();
     pi.unregisterProvider("router");
@@ -3690,6 +3700,7 @@ ${summary}` }];
 type RouterStatusPhase = "trying" | "success" | "failed" | "fallback" | "aborted";
 
 type RouterState = {
+  allowance: AllowanceStore;
   affinity: RouteAffinity;
   budgets: WeakMap<AssistantMessageEventStream, FailoverBudget>;
   activeChannels: Map<string, string>;  // modelId -> current active routeKey
@@ -3749,6 +3760,7 @@ type RouterState = {
 
 function createRouterState(): RouterState {
   return {
+    allowance: new AllowanceStore(),
     affinity: new RouteAffinity(),
     budgets: new WeakMap(),
     activeChannels: new Map(),
@@ -4809,9 +4821,36 @@ function determineRouteOrder(
   if (sortBy === "latency") routes = sortRoutesByLatency(modelId, routes);
   if (sortBy === "cost" || sortBy === "costFirst") routes = sortRoutesByCost(modelId, routes);
   if (sortBy === "capabilityFirst") routes = sortRoutesByCapability(modelId, routes);
-  const result = orderEconomicRoutes(routes, config.routeMetadata ?? {}, config.routingPolicy ?? {}, Date.now());
+  refreshAllowances(config);
+  const objective = config.routingPolicy?.objective;
+  const result = config.routingPolicy?.enabled && (objective === 'expiring' || objective === 'smart-lite')
+    ? orderAllowanceRoutes(routes, config.routeMetadata ?? {}, config.allowance?.enabled ? getRouterState().allowance : new AllowanceStore(), objective, Date.now(), config.allowance?.ttlMs)
+    : orderEconomicRoutes(routes, config.routeMetadata ?? {}, config.routingPolicy ?? {}, Date.now());
   if (config.routingPolicy?.enabled) debugLog(`[pi-router] Policy ${modelId}: ${result.reason}`);
   return result.routes;
+}
+
+function refreshAllowances(config: RouterConfig): void {
+  if (!config.allowance?.enabled) return;
+  const state = getRouterState();
+  // Manual/gateway snapshots are explicit operator assertions, never local usage estimates.
+  for (const [key, snapshot] of state.allowance.snapshots) {
+    if (snapshot.source === 'manual' || snapshot.source === 'trusted-gateway') state.allowance.snapshots.delete(key);
+  }
+  for (const snapshot of config.allowance.snapshots ?? []) {
+    if (snapshot.source === 'manual' || snapshot.source === 'trusted-gateway') state.allowance.snapshots.set(AllowanceStore.key(snapshot), snapshot);
+  }
+  for (const source of config.allowance.sources ?? []) {
+    if (source.adapter !== 'openrouter-key' || source.providerId !== 'openrouter') continue;
+    const adapter = new OpenRouterAllowanceAdapter(async () => {
+      const registry = state.currentModelRegistry;
+      const model = registry?.getAll?.().find((m: any) => m.provider === 'openrouter');
+      if (!model || getRouterState() !== state) return undefined;
+      const auth = await getResolvedRegistryAuth(registry, model);
+      return auth.auth?.apiKey;
+    });
+    void state.allowance.refresh(source, adapter, config.allowance);
+  }
 }
 
 function routeEntriesFromOrder(modelConfig: RouterModelConfig, order: string[]): RouterRouteEntry[] {

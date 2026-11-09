@@ -28,3 +28,24 @@ Opt in with `"affinity":{"mode":"turn","returnToPreferred":true,"minResidenceMs"
 
 `"failoverBudget":{"maxAttempts":4,"maxTotalWaitMs":45000,"respectRetryAfter":true}` bounds the existing executor chain, including explicit fallback; skips do not count as attempts. Deadline abort reaches the stream relay. No second retry loop or speculative generation is added. Auxiliary fallback summarization uses deterministic text transfer when a budget is enabled, avoiding unbudgeted LLM calls. Committed text/tool output still forbids replay/failover. Structured status/code/Retry-After fields, when exposed by the provider SDK, augment the last 50 failures per model; quota, credit, rate-limit, auth and transient errors are distinguished. Missing headers are unknown, not fabricated reset times. Retry-After delays re-admission via cooldown, not a sleeping retry loop. Built-in provider SDK retries remain outside router attempt counts.
 
+## Phase 3: allowance snapshots
+
+All disabled by default. Example (merge with existing model configuration):
+
+```json
+{
+  "routingPolicy": {"enabled": true, "objective": "smart-lite"},
+  "allowance": {
+    "enabled": true, "ttlMs": 60000, "timeoutMs": 1500, "backoffMs": 30000,
+    "sources": [{"adapter":"openrouter-key", "providerId":"openrouter", "accountRef":"my-account", "quotaPoolId":"key-budget", "modelScope":["exact-upstream-id"]}]
+  },
+  "routeMetadata": {"canonical@openrouter": {"quotaPoolRef":"key-budget"}}
+}
+```
+
+The real OpenRouter adapter reads `https://openrouter.ai/api/v1/key` with the active registry's OpenRouter key. It does not read auth files, accept a configurable endpoint, follow redirects, log keys or generate completions. It maps enforced `budgets` (all windows), or explicit `limit`/`limit_remaining` when budget layers are absent. These are **key spending limits**, not account credit balances. Unlimited, missing, malformed and usage-only responses are unknown. Reference: https://openrouter.ai/docs/api/api-reference/api-keys/get-current-key . Network behavior is verified with mocked HTTP, not a live credentialed request.
+
+Snapshots carry provider/account/pool identity, exact model scope, observation timestamp, source/confidence, multiple used-share/reset/expiry windows, optional amount/unit/paid-continuation and free-plan assertion. `allowance.snapshots` also accepts explicit `manual` or `trusted-gateway` snapshots in that shape; operators must provide current data, not derive balances from local router usage. Account/pool refs must not contain secrets. Ambiguous accounts, stale/future snapshots, expired windows, missing scope/data preserve legacy ordering for the whole exact-model group. All candidates need valid snapshots, even if this means the new objective remains inactive for most providers.
+
+Refresh is non-blocking, coalesced, cached, bounded to 1.5s by default and backed off on error; the current request does not wait for HTTP and initially falls back. Session shutdown aborts refresh. Smart-lite uses the worst window utilization and puts exhausted/near-exhausted non-paid-continuation pools behind healthy pools. This is deliberately not full magpie Smart, a price optimizer or an account scheduler. Expiring additionally requires known free-plan status (and a reset/expiry for free pools) for every candidate, preferring free allocations lapsing soon; OpenRouter spending budgets alone do NOT assert free-plan status, so expiring conservatively falls back until explicit trusted metadata supplies that information. No cross-model downgrade.
+
