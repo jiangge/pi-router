@@ -158,6 +158,18 @@ function createInteractiveCtx(scripts: string[][]) {
 }
 
 describe('config order adjustment helpers', () => {
+  it('preserves groups, referenced full model mappings and advanced settings through the full wizard', async () => {
+    const ctx = createQueuedCtx(['channelFirst','manual','true','disabled','true',[{id:'plan',channels:['a','b']},{id:'new-model',channels:['a','b']}]]);
+    const original = { groups:[{id:'plan',members:['router/vendor/full.id']}], models:[{id:'vendor/full.id',channels:['offline'],modelByChannel:{offline:'concrete/upstream'}}], request:{maxTokens:2000} };
+    let saved:any;
+    await runConfigWizard(ctx, () => [{id:'new-model',provider:'a'},{id:'new-model',provider:'b'}], groupByModel, c => {saved=c;}, () => 'hash', () => '/tmp/models.json', original as any);
+    expect(saved.groups).toEqual(original.groups);
+    expect(saved.models).toEqual([{id:'new-model',channels:['a','b']},original.models[0]]);
+    expect(saved.request).toEqual(original.request);
+    const orderCtx = createQueuedCtx([[{id:'vendor/full.id',channels:['offline']}]]);
+    await runConfigOrderWizard(orderCtx, original as any, () => [], c => {saved=c;});
+    expect(saved.groups).toEqual(original.groups);
+  });
   it('detects whether an existing router config can be reordered', () => {
     expect(hasExistingRouterModelConfig({ models: [{ id: 'm1', channels: ['a'] }] } as any)).toBe(true);
     expect(hasExistingRouterModelConfig({ models: [] } as any)).toBe(false);

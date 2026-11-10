@@ -5,6 +5,7 @@ export class RouteAffinity {
   turn = 0;
   private records = new Map<string, AffinityRecord>();
   beginUserTurn() { this.turn++; }
+  delete(key: string) { this.records.delete(key); }
   clear() { this.records.clear(); this.turn++; }
   success(key: string, modelId: string, routeKey: string, channel: string, config: AffinityConfig, now: number, cache: boolean) {
     const prior = this.records.get(key);

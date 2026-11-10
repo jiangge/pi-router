@@ -32,6 +32,24 @@ English | [简体中文](./README.zh-CN.md)
 - Interactive configuration wizard
 - Fast startup with lazy loading and caching
 
+## Named router groups
+
+`groups` adds entries such as `router/plan`, `router/execute`, and `router/review` alongside ordinary router models in `/model`. The complete example includes planning, execution, and review groups; the review group is for code review tasks and uses `api666-zzzcoding/codex-auto-review` and `api666-zzzcoding/gpt-6.1-sol` as members.
+
+```json
+{"groups":[{"id":"plan","members":["router/lucky-php/claude-opus-5-5","router/gpt-6-astra"]}]}
+```
+
+Members must **exactly** match existing `models[].id` after `router/`; no short-name resolution, direct providers, nested groups, `router/auto`, or opaque magpie `group/`/`auto/` leaves. Group ids must be unique (lowercase letter followed by up to 63 lowercase letters/digits/`_`/`-`) and cannot collide with ordinary model ids or `auto`. Limits: 128 groups, 256 members per group.
+
+Groups exhaust each member's channels before moving to the next configured member, reuse channel economics/health, and **ignore member fallbackModels**. They never escape into auto or other groups. A successful member/route is pinned per group/session, independently of direct-model sticky state. Default affinity is `session, returnToPreferred=false`; use `turn, returnToPreferred=true` to recover configured order on the next user turn, not between tools. `/router reset plan` clears only that group's pin. Session navigation and changes to group/model definitions clear pins; nothing is persisted globally.
+
+One group request has a shared default budget of **4 attempts / 120000 ms**, configurable with `failoverBudget` on a group; global limits cap each dimension. Skipped candidates do not consume attempts. Cancellation, budget exhaustion and post-commit errors stop the chain. No model switch is allowed after text/thinking/tool output is committed.
+
+Groups advertise conservative common known capabilities, then check every actual route even when economic policy is off. Missing capability metadata prevents publication/admission; no provisional group defaults are invented. Context is not summarized or truncated. Paired tool history and foreign reasoning use known host adapter conversions; unknown custom APIs with foreign tool/thinking history are rejected. Oversized context requires explicit Pi compaction. Catalog zero costs are placeholders, not free-price assertions. Changes to selectable entries require `/reload` (request-time config edits are validated; invalid edits retain the last good config).
+
+See [complete example](./examples/router-groups.config.json). Its concrete upstream ids were verified in the local model directory, not probed for availability, quality, tools or price. Configure matching real providers and explicit member models before using it. Full/order wizards and saves preserve groups; sync retains referenced offline models and skips reserved group-name imports.
+
 ## Quick Start
 
 ### 1. Install

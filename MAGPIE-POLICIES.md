@@ -22,6 +22,12 @@ Legacy `cost`/`costFirst` retain their reference-price/multiplier behavior for c
 
 Diagnostics: enable the existing debug logging in an isolated test config, then use `/router explain` and `/router decisions`. Policy diagnostics describe source/fallback/retention reasons, not user message text. No active price probes or quota HTTP requests happen just by installing this version.
 
+## Named router groups (V2)
+
+Groups are explicit ordered cross-model allowlists, not an extension of economic ranking. Use exact `router/<models[].id>` references; short names are not inferred. Existing metadata keys remain **member canonical id + routeKey**, never group id. Member cooldown/circuit/allowance state is reused; group affinity is independent and defaults to session retention even if legacy global sticky is off. Groups ignore member `fallbackModels` and never escape to auto. Actual leaves are deduplicated per request. Opaque magpie `group/` and `auto/` leaves are rejected for group use, without changing direct-model routing.
+
+Default group budget is 4 admitted attempts / 120000 ms, capped by global limits. Hard image/tools/reasoning/window/output admission remains active when economics is disabled. No model probing or speculative generation is introduced. See [group configuration and limitations](./README.md#named-router-groups) and [concrete full-id example](./examples/router-groups.config.json); catalog presence is not evidence of live availability or price.
+
 ## Phase 2: scoped affinity and shared failover budget
 
 Opt in with `"affinity":{"mode":"turn","returnToPreferred":true,"minResidenceMs":30000}`. Modes: `legacy` (default), `turn`, `session`, `cache-aware`. Successful routes remain pinned through tool loops in a user turn; only a new user prompt advances the turn. Session/branch navigation invalidates scoped state. Cache-aware retention requires an explicit short/long cache-retention hint and expires after `cacheTtlMs` (default 300000); this is a bounded hint, not a measured cache saving. Minimum residence delays return-to-preferred to reduce oscillation. Recovery always uses normal cooldown/circuit admission. `sticky:false` still wins. Scoped state is not written to stickyRecords.

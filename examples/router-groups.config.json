@@ -1,0 +1,34 @@
+{
+  "auto": false,
+  "autoSync": false,
+  "sortBy": "manual",
+  "healthProbe": { "enabled": false },
+  "models": [
+    { "id": "lucky-php/claude-opus-5-5", "channels": ["magpie"] },
+    { "id": "gpt-6-astra", "channels": ["pipi"] },
+    { "id": "opencode/deepseek-v4.1-flash-free", "channels": ["magpie"] },
+    { "id": "opencode/glm-5.3-flash-free", "channels": ["magpie"] },
+    { "id": "api666-zzzcoding/codex-auto-review", "channels": ["magpie"] },
+    { "id": "api666-zzzcoding/gpt-6.1-sol", "channels": ["magpie"] }
+  ],
+  "groups": [
+    {
+      "id": "plan",
+      "name": "方案组",
+      "members": ["router/lucky-php/claude-opus-5-5", "router/gpt-6-astra"],
+      "affinity": { "mode": "session", "returnToPreferred": false }
+    },
+    {
+      "id": "execute",
+      "name": "执行组",
+      "members": ["router/opencode/deepseek-v4.1-flash-free", "router/opencode/glm-5.3-flash-free"],
+      "affinity": { "mode": "turn", "returnToPreferred": true }
+    },
+    {
+      "id": "review",
+      "name": "审查组",
+      "members": ["router/api666-zzzcoding/codex-auto-review", "router/api666-zzzcoding/gpt-6.1-sol"],
+      "affinity": { "mode": "session", "returnToPreferred": false }
+    }
+  ]
+}

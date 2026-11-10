@@ -2,6 +2,12 @@
 
 This guide helps you test pi-router functionality in a real pi environment.
 
+## Groups V2 automated regression
+
+Run `npm test`, `npm run typecheck`, `npm run typecheck:pi`, and `npm run build` in the clone. The group suites (`group-config`, `group-routing`, `group-context`) use temporary configuration directories and mock providers; do not edit the live agent configuration or probe magpie models. Additional wizard and Pi ModelRuntime integration tests verify preservation of full-id references and selectable startup group entries. Coverage includes invalid references/conflicts/dynamic leaves, channel-before-member order, shared health with separate pins, duplicate upstream elimination, ignored member fallbacks, bounded attempts/deadline, cancellation, committed text/thinking/tools, conservative catalog capabilities and context/tool-pair admission.
+
+Group examples require matching concrete upstream registrations and explicit `models` entries. `/reload` refreshes selector entries. Manually inspecting `/model`, `/router decisions`, or `/router explain` does not require sending a model probe. Unknown capability metadata can prevent a group from appearing; this is intentional, not permission to add fabricated provisional metadata.
+
 ## Installation
 
 ### Method 1: Local Development (Recommended for testing)

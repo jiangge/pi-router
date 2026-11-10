@@ -53,6 +53,17 @@ function applyPendingProviders(runtime: ModelRuntime, loaded: Awaited<ReturnType
 }
 
 describe('Pi ModelRuntime integration', () => {
+  it('selects router/plan from the startup catalog alongside ordinary members without manual router registration', async () => {
+    const dir = createConfigDir({ providers:{'dynamic-provider':{api:'openai-completions',baseUrl:'https://mock.test',apiKey:'mock-key',models:[{id:'m1',name:'Member',reasoning:false,input:['text'],contextWindow:200000,maxTokens:16384,cost:{input:0,output:0,cacheRead:0,cacheWrite:0}}]}} });
+    fs.writeFileSync(path.join(dir,'pi-router.json'),JSON.stringify({auto:false,autoSync:false,models:[{id:'m1',channels:['dynamic-provider']}],groups:[{id:'plan',name:'方案组',members:['router/m1']}]}));
+    const loaded = await loadRouterFactory();
+    const runtime = await ModelRuntime.create({modelsPath:null,refreshOnCreate:false});
+    applyPendingProviders(runtime,loaded);
+    await runtime.refresh({allowNetwork:false});
+    const selected = await findInitialModel({scopedModels:[],isContinuing:false,defaultProvider:'router',defaultModelId:'plan',modelRuntime:runtime});
+    expect(selected.model).toMatchObject({provider:'router',id:'plan',contextWindow:200000,maxTokens:16384});
+    expect(runtime.getModel('router','m1')).toBeDefined();
+  });
   it('selects router/auto before session_start when the upstream provider catalog is runtime-only', async () => {
     createConfigDir();
     const eventBus = createEventBus();

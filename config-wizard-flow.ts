@@ -20,8 +20,11 @@ import {
   type ChannelScore
 } from "./config-wizard.js";
 
+import { validateGroups, type RouterGroupConfig } from './core/group-config.js';
+
 // Import types and functions from main index
 type RouterConfig = {
+  groups?: RouterGroupConfig[];
   strategy?: "channelFirst" | "custom";
   sortBy?: "manual" | "capabilityFirst" | "costFirst" | "latency" | "cost";
   autoSync?: boolean;
@@ -237,7 +240,8 @@ export async function runConfigWizard(
   groupModelsByChannels: (models: any[]) => Map<string, string[]>,
   saveConfig: (config: RouterConfig) => void,
   calculateFileHash: (path: string) => string,
-  getModelsJsonPath: () => string
+  getModelsJsonPath: () => string,
+  existingConfig: RouterConfig = {},
 ): Promise<void> {
   const wizardConfig: Partial<WizardConfig> = {};
   
@@ -305,6 +309,7 @@ export async function runConfigWizard(
 
     // Build final config based on strategy
     const finalConfig: RouterConfig = {
+      ...existingConfig,
       strategy: wizardConfig.strategy,
       sortBy: wizardConfig.sortBy,
       autoSync: wizardConfig.autoSync,
@@ -328,6 +333,14 @@ export async function runConfigWizard(
       finalConfig.models = orderResult as RouterConfig["models"];
     }
     
+    // Group references and their explicit routes survive rediscovery, even offline.
+    const references = new Set(existingConfig.groups?.flatMap(g => g.members.map(m => m.slice(7))) ?? []);
+    const reserved = new Set(existingConfig.groups?.map(g => g.id) ?? []);
+    finalConfig.models = [
+      ...(finalConfig.models ?? []).filter(m => !references.has(m.id) && !reserved.has(m.id)),
+      ...(existingConfig.models ?? []).filter(m => references.has(m.id)),
+    ];
+    validateGroups(finalConfig);
     // Save config
     saveConfig(finalConfig);
     

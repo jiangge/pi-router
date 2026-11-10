@@ -179,7 +179,11 @@ import { RouteAffinity, type AffinityConfig } from './core/affinity.js';
 import { FailoverBudget, type FailoverBudgetConfig } from './core/failover-budget.js';
 import { classifyFailure, type FailureClassification } from './core/failure-classifier.js';
 
+import { validateGroups, groupBudget, type RouterGroupConfig } from './core/group-config.js';
+import { commonGroupCapabilities, groupContextIncompatibility } from './core/group-context.js';
+
 type RouterConfig = {
+  groups?: RouterGroupConfig[];
   allowance?: AllowanceConfig;
   routingPolicy?: RoutingPolicy;
   routeMetadata?: Record<string, RouteMetadata>;
@@ -1424,6 +1428,9 @@ function getFileMtimeMs(filePath: string): number | null {
 
 function setCurrentRouterConfig(config: RouterConfig): RouterConfig {
   const state = getRouterState();
+  if (JSON.stringify([state.currentRouterConfig?.groups, state.currentRouterConfig?.models]) !== JSON.stringify([config.groups, config.models])) {
+    state.affinity.clear();
+  }
   state.currentRouterConfig = config;
   state.autoSyncConfig = config;
   setRouterDebugState(config);
@@ -1473,6 +1480,7 @@ function loadConfig(): RouterConfig {
   try {
     const content = fs.readFileSync(configPath, "utf-8");
     const config = JSON.parse(content) as RouterConfig;
+    validateGroups(config);
     return {
       strategy: "channelFirst",
       auto: true,
@@ -1482,9 +1490,11 @@ function loadConfig(): RouterConfig {
     };
   } catch (err) {
     console.error("[pi-router] Failed to load config:", err);
+    getRouterState().currentUi?.notify?.(`Invalid pi-router configuration: ${String(err)}`, 'error');
+    if (getRouterState().currentRouterConfig) return getRouterState().currentRouterConfig!;
     return {
       strategy: "channelFirst",
-      auto: true,
+      auto: false,
       autoSync: true,
       healthProbe: { enabled: false },
       models: [],
@@ -1503,6 +1513,7 @@ function saveConfig(config: RouterConfig): void {
     fs.mkdirSync(configDir, { recursive: true });
   }
   
+  validateGroups(config);
   try {
     atomicWriteFileSync(configPath, JSON.stringify(addConfigComments(config), null, 2), "utf8");
     writeConfigReadme(configPath);
@@ -1544,6 +1555,7 @@ function addConfigComments(config: RouterConfig): Record<string, unknown> {
       : {}),
     _comment_models: "模型配置: id 是 router/<id> 的 canonical 名；aliases/modelByChannel 可把不同上游模型名归并到同一模型；channels 从左到右依次尝试；fallbackModels 为模型级降级链",
     models: config.models ?? [],
+    ...(config.groups ? { groups: config.groups } : {}),
     _comment_customOrder: "自定义顺序(仅 custom 策略): model@channel 二元组数组，按此顺序尝试；customRoutes 用于区分同 provider 的模型名变种",
     ...(config.customOrder ? { customOrder: config.customOrder } : {}),
     ...(config.customRoutes ? { customRoutes: config.customRoutes } : {}),
@@ -1899,7 +1911,8 @@ async function showConfigMenu(ctx: any, config: RouterConfig): Promise<void> {
         groupModelsByChannels,
         saveConfig,
         () => calculateSyncSourceHash(true),
-        getModelsJsonPath
+        getModelsJsonPath,
+        config,
       );
       break;
     case "order":
@@ -2341,11 +2354,7 @@ function createRouterFooterComponent(_tui: any, theme: any, footerData: any) {
       if (sessionName) pwd = `${pwd} • ${sessionName}`;
 
       const statsLeft = formatStatsLine(theme, width);
-      const status = getRouterState().lastStatusUpdate;
       const model = getRouterState().currentModel;
-      const routeStatus = status && getRouterState().currentModelProvider === "router"
-        ? formatRouteStatus(theme, status)
-        : "";
 
       let modelText = model?.id || "no-model";
       if (model?.reasoning) {
@@ -2811,6 +2820,7 @@ function initializeRouterExtension(pi: ExtensionAPI, sessionState: RouterState) 
           { value: "all", label: "all", description: "Reset every model plus the auto chain" },
           { value: "auto", label: "auto", description: "Reset the auto chain" },
           ...(currentConfig.models || []).map(m => ({ value: m.id, label: m.id, description: `Reset router/${m.id}` })),
+          ...(currentConfig.groups || []).map(g => ({ value: g.id, label: g.id, description: `Reset group router/${g.id} affinity` })),
         ];
         const filtered = items
           .filter(cmd => cmd.value.toLowerCase().startsWith(secondPart))
@@ -2872,7 +2882,8 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
         groupModelsByChannels,
         saveConfig,
         () => calculateSyncSourceHash(true),
-        getModelsJsonPath
+        getModelsJsonPath,
+        config,
       );
     } else if (matchedSubcmd === "order") {
       await runConfigOrderWizard(
@@ -3112,6 +3123,8 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
     const action = syncParts[1]?.toLowerCase();
     
     if (action === "accept") {
+      // Stage edits: a rejected group reference must not mutate the last good config.
+      const config = structuredClone(getCurrentRouterConfig());
       // Apply changes
       const currentModels = getSyncModels();
       const diff = detectModelChanges(config, currentModels);
@@ -3119,7 +3132,7 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
       // Remove deleted models
       if (config.models) {
         config.models = config.models.filter(m => 
-          !diff.removed.some(r => r.id === m.id)
+          config.groups?.some(g => g.members.includes(`router/${m.id}`)) || !diff.removed.some(r => r.id === m.id)
         );
       } else {
         config.models = [];
@@ -3129,6 +3142,10 @@ async function routerHandler(args: string, ctx: any): Promise<void> {
 
       // Add new models
       for (const added of diff.added) {
+        if (config.groups?.some(g => g.id === added.id)) {
+          ctx.ui.notify(`Sync skipped router/${added.id}: reserved group name`, 'warning');
+          continue;
+        }
         const group = currentGroups.get(added.id);
         config.models.push(group
           ? createRouterModelConfigFromGroup(added.id, group)
@@ -3968,7 +3985,8 @@ function collectChainRouteModels(
 
 function createMirrorModels(
   configuredModels: RouterModelConfig[],
-  modelMap: Map<string, PiModel>
+  modelMap: Map<string, PiModel>,
+  groups: RouterGroupConfig[] = [],
 ): any[] {
   const mirrorModels: any[] = [];
 
@@ -4046,6 +4064,19 @@ function createMirrorModels(
     debugLog(`[pi-router] Configured router/${configModel.id} with ${configModel.channels.length} channels`);
   }
   
+  for (const group of groups) {
+    const leaves = group.members.flatMap(member => {
+      const model = configuredModels.find(m => m.id === member.slice(7));
+      return model ? getModelRouteEntries(model).flatMap(entry => {
+        const route = resolveConfiguredRouteByEntry(model, entry, modelMap);
+        return route ? [route.model] : [];
+      }) : [];
+    });
+    const capabilities = commonGroupCapabilities(leaves);
+    if (!capabilities) { debugLog(`[pi-router] Group ${group.id}: no confirmed common capabilities; not publishing`); continue; }
+    mirrorModels.push({ id: group.id, name: `${group.name || group.id} (group)`, api: ROUTER_API,
+      ...capabilities, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+  }
   return mirrorModels;
 }
 
@@ -4099,7 +4130,8 @@ function registerRouterProvider(
   // Build a map of all available real models by id@provider.
   const modelMap = buildModelMap(allModels);
 
-  const resolvedMirrorModels = createMirrorModels(configuredModels, modelMap);
+  validateGroups(config);
+  const resolvedMirrorModels = createMirrorModels(configuredModels, modelMap, config.groups);
   const mirrorModels = options?.allowProvisional
     ? [...resolvedMirrorModels, ...createProvisionalMirrorModels(configuredModels, config, resolvedMirrorModels)]
     : resolvedMirrorModels;
@@ -4278,6 +4310,10 @@ function resetRoutingPointer(
   failuresCleared: number;
 } {
   const scope = target && target !== "all" ? target : "all";
+  if (config.groups?.some(g => g.id === scope)) {
+    getRouterState().affinity.delete(`group:${scope}`);
+    return { scope, stickyCleared: [], activeChannelsCleared: 0, cooldownsCleared: 0, healthReset: 0, circuitsReset: 0, failuresCleared: 0 };
+  }
   const models = config.models || [];
   const targetModelIds =
     scope === "all" || scope === "auto"
@@ -4764,6 +4800,12 @@ function routeRequest(
     return routeAutoMode(context, options, config, modelMap);
   }
   
+  const group = config.groups?.find(g => g.id === modelId);
+  if (group) {
+    const frozenConfig = structuredClone(config);
+    return createGroupStream(frozenConfig.groups!.find(g => g.id === group.id)!, context, options, frozenConfig, new Map(modelMap));
+  }
+
   const modelConfig = config.models?.find(m => m.id === modelId);
   
   if (!modelConfig) {
@@ -4788,6 +4830,80 @@ function routeRequest(
     modelConfig,
     modelMap
   );
+}
+
+/** Group orchestration deliberately never calls member fallback or recursively routes. */
+function createGroupStream(
+  group: RouterGroupConfig, context: Context, options: SimpleStreamOptions | undefined,
+  config: RouterConfig, modelMap: Map<string, PiModel>,
+): AssistantMessageEventStream {
+  const stream = createAssistantMessageEventStream();
+  const affinity = { mode: 'session' as const, returnToPreferred: false, ...group.affinity };
+  const key = `group:${group.id}`;
+  const pin = getRouterState().affinity.select(key, affinity, Date.now());
+  const requestConfig: RouterConfig = { ...config, affinity: undefined, sticky: false,
+    failoverBudget: groupBudget(config.failoverBudget, group.failoverBudget) };
+  const routedOptions = applyRouterRequestOptions(options, requestConfig);
+  getRequestBudget(stream, requestConfig);
+  const members = group.members.map(ref => config.models?.find(m => m.id === ref.slice(7))).filter((m): m is RouterModelConfig => !!m);
+  const preferredMember = members.find(m => m.id === pin.record?.modelId);
+  const ordered = preferredMember ? [preferredMember, ...members.filter(m => m !== preferredMember)] : members;
+  const candidates = ordered.flatMap(member => {
+    const routes = determineRouteOrder(member.id, { ...member, sticky: false }, requestConfig);
+    const pinned = member.id === preferredMember?.id ? routes.find(r => r.routeKey === pin.record?.routeKey) : undefined;
+    return (pinned ? [pinned, ...routes.filter(r => r !== pinned)] : routes).map(entry => ({ member, entry }));
+  });
+  const explanations: string[] = [];
+  const attempted: string[] = [];
+  const seen = new Set<string>();
+  debugLog(`[pi-router] Group router/${group.id}: ${pin.reason}; members ${ordered.map(m => m.id).join(' → ')}`);
+  const stop = (error: string, aborted = false) => {
+    stream.push(createRouterErrorEvent(group.id, 'router', ROUTER_API, error, aborted ? 'aborted' : 'error'));
+    stream.end();
+  };
+  (async () => {
+    for (const { member, entry } of candidates) {
+      if (routedOptions?.signal?.aborted) { stop('Group request aborted', true); return; }
+      const label = `router/${member.id}@${entry.routeKey}`;
+      const route = resolveConfiguredRouteByEntry(member, entry, modelMap);
+      if (!route) { explanations.push(`${label}: target missing`); continue; }
+      if (route.model.provider === 'magpie' && /^(group|auto)\//.test(route.model.id)) {
+        explanations.push(`${label}: opaque magpie dynamic leaf unsupported`); continue;
+      }
+      const identity = JSON.stringify([route.model.provider, route.model.id]);
+      if (seen.has(identity)) { explanations.push(`${label}: duplicate upstream skipped`); debugLog(`[pi-router] Group ${group.id}: duplicate ${identity}`); continue; }
+      seen.add(identity);
+      const reason = groupContextIncompatibility(route.model, context, routedOptions, estimateContextTokens(context) + Math.ceil(JSON.stringify(context.tools ?? []).length / 3));
+      if (reason) { explanations.push(`${label}: ${reason}`); debugLog(`[pi-router] Group ${group.id}: skip ${label}: ${reason}`); continue; }
+      const result = await executeRouteAttempt({
+        stateModelId: member.id, virtualModelId: group.id, modelConfig: member, route,
+        context: structuredClone(context), options: routedOptions, config: requestConfig, outputStream: stream,
+        onAdmitted: () => {
+          attempted.push(label);
+          debugLog(`[pi-router] Group ${group.id}: trying ${label} → ${route.model.provider}/${route.model.id}`);
+          updateRouteSnapshot(group.id, member.id, route.model, 'trying');
+          updateFooterStatus(group.id, route.channel, route.model.id, 'trying', [...attempted], undefined, route.model.api);
+          logDecision({ timestamp: Date.now(), modelId: group.id, selectedChannel: label, attemptedChannels: [...attempted],
+            sortStrategy: member.sortBy || config.sortBy || 'config', fallbackUsed: attempted.length > 1,
+            reason: `group member order; ${pin.reason}; ${explanations.join('; ') || 'first eligible route'}` });
+        },
+        onCommit: () => {
+          updateRouteSnapshot(group.id, member.id, route.model, 'success');
+          updateFooterStatus(group.id, route.channel, route.model.id, 'success', [...attempted], undefined, route.model.api);
+        },
+        onSuccess: () => getRouterState().affinity.success(key, member.id, route.routeKey, route.channel, affinity, Date.now(),
+          routedOptions?.cacheRetention === 'short' || routedOptions?.cacheRetention === 'long'),
+      });
+      if (result.status === 'succeeded') { stream.end(); return; }
+      if (result.status === 'skipped') { explanations.push(`${label}: ${result.reason}`); continue; }
+      explanations.push(`${label}: ${formatUserFacingFailure(result.error)}`);
+      updateRouteSnapshot(group.id, member.id, route.model, 'failed');
+      updateFooterStatus(group.id, route.channel, route.model.id, result.aborted ? 'aborted' : 'failed', [...attempted], result.error, route.model.api);
+      if (result.aborted || result.committed) { stop(`Group router/${group.id} stopped: ${formatUserFacingFailure(result.error)}`, result.aborted); return; }
+    }
+    stop(`Group router/${group.id} exhausted (no group escape): ${explanations.join('; ') || 'no candidates'}`);
+  })().catch(error => stop(`Group router/${group.id}: ${formatUserFacingFailure(String(error))}`));
+  return stream;
 }
 
 /**
@@ -4993,6 +5109,7 @@ function getErrorMessage(error: unknown): string {
 
 function formatUserFacingFailure(error: string): string {
   const text = error || "";
+  if (text === 'failover budget: maximum attempts reached' || text === 'failover budget: total wait deadline reached') return text;
   const lower = text.toLowerCase();
   const code = text.match(/(?:^|\D)(401|403|408|409|429|500|502|503|504)(?:\D|$)/)?.[1];
 
@@ -6482,6 +6599,8 @@ export {
   isAbortError,
   createMirrorModels,
   createFailoverStream,
+  createGroupStream,
+  routeRequest,
   determineChannelOrder,
   expandProviderModels,
   modelsFromRegistry,

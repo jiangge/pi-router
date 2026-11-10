@@ -5,6 +5,17 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-11-10
+
+### Added
+
+- Named router groups: a group is an ordered list of `router/<model>` references published as `router/<group>` (for example `router/plan`). Selecting a group tries its members in configuration order, each reusing that member route's channel failover, circuit breaking, pricing, and quota policies; a group never escapes to a member's `fallbackModels`, another group, or the full auto pool. Groups support session/turn affinity, bounded attempt and time budgets, conservative shared-capability admission for heterogeneous tool histories, and load-time validation (exact member ids, no nesting, no `router/auto` members, reserved names rejected). `/router reset <group>` clears only the group's pin. The shipped example `examples/router-groups.config.json` defines `plan`, `execute`, and `review` groups.
+- Magpie borrowing: opt-in trusted route pricing with stable economic sorting, scoped affinity recovery with shared failover budgets, and provider allowance snapshots with conditional quota policies (see `MAGPIE-POLICIES.md`).
+
+### Compatibility
+
+- Verified with Pi `1.5.1`: the full test suite (16 files, 234 tests), `typecheck`, `typecheck:pi` against the installed host, and `build` all pass.
+
 ## [0.5.9] - 2026-10-18
 
 ### Compatibility
