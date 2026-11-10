@@ -34,7 +34,7 @@ Pi 的智能路由层，提供多级故障转移与可观测性。
 
 ## 命名模型组（V2）
 
-新增 `groups`，入口就是 `router/plan`、`router/execute`、`router/review`，在 `/model` 与普通 router 模型并列。完整示例包含方案、执行、审查三个组；审查组用于代码审查类任务，成员为 `example/codex-auto-review` 与 `example/gpt-6.1-sol`。成员必须精确引用已有 `models[].id`，如 `router/lucky-php/claude-opus-5-5`；不解析短名，不接受直连 provider、嵌套组、`router/auto` 或 magpie `group/`、`auto/` 动态叶子。组名以小写字母开头，其后仅小写字母、数字、`_`、`-`，总长 1–64；不得与普通模型或 `auto` 同名。最多 128 组，每组 256 成员。
+新增 `groups`，入口就是 `router/plan`、`router/execute`、`router/review`，在 `/model` 与普通 router 模型并列。完整示例包含方案、执行、审查三个组；审查组用于代码审查类任务，成员为 `example/codex-auto-review` 与 `example/gpt-6.1-sol`。成员必须精确引用已有 `models[].id`，如 `router/example/claude-opus-5-5`；不解析短名，不接受直连 provider、嵌套组、`router/auto` 或 magpie `group/`、`auto/` 动态叶子。组名以小写字母开头，其后仅小写字母、数字、`_`、`-`，总长 1–64；不得与普通模型或 `auto` 同名。最多 128 组，每组 256 成员。
 
 - 按成员配置顺序，先用尽成员渠道，再切下一成员；保留渠道价格/额度/健康策略，**组内忽略成员 fallbackModels**，耗尽不逃逸。
 - 默认独立会话亲和 `session + returnToPreferred=false`；执行组可设 `turn + returnToPreferred=true`，下一用户轮恢复首选，工具循环不切轮。组 pin 不读写成员旧 sticky，不持久化。
@@ -43,7 +43,7 @@ Pi 的智能路由层，提供多级故障转移与可观测性。
 - 组目录声明保守共同能力，每个真实候选仍无条件做准入检查（不依赖经济策略开关）；元数据不明不编造默认能力。保留完整上下文及工具结果，不静默截断/摘要。跨模型思考/工具历史使用已知宿主适配器转换；不明自定义 API 拒绝不安全历史。窗口不够需用户显式压缩。目录零 cost 不是免费报价。
 - 保存和完整/顺序向导保留 groups 与所引用的显式模型映射；sync 保留引用中的离线模型并跳过与组同名的导入。请求时热更新拒绝非法配置并保留最近合法版本；选择器新增/删改条目请 `/reload`。
 
-[可复制完整示例](./examples/router-groups.config.json) 使用核实过的真实上游全名，没有新短名别名系统；需要已有对应真实 provider 注册。只证明本机目录存在，不证明在线可用、工具能力、价格或厂商身份。未找到精确 `claude-opus-5.5`，示例使用实际存在的 `lucky-php/claude-opus-5-5`。
+[可复制完整示例](./examples/router-groups.config.json) 使用完整的上游全名格式，没有新短名别名系统；需要已有对应真实 provider 注册。示例中的 provider 名为占位名，套用时换成你自己已注册的真实 provider 与模型全名；示例只证明格式与引用关系，不证明在线可用、工具能力、价格或厂商身份。
 
 ## 快速开始
 

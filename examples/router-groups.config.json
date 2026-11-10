@@ -4,7 +4,7 @@
   "sortBy": "manual",
   "healthProbe": { "enabled": false },
   "models": [
-    { "id": "lucky-php/claude-opus-5-5", "channels": ["magpie"] },
+    { "id": "example/claude-opus-5-5", "channels": ["magpie"] },
     { "id": "gpt-6-astra", "channels": ["pipi"] },
     { "id": "opencode/deepseek-v4.1-flash-free", "channels": ["magpie"] },
     { "id": "opencode/glm-5.3-flash-free", "channels": ["magpie"] },
@@ -15,7 +15,7 @@
     {
       "id": "plan",
       "name": "方案组",
-      "members": ["router/lucky-php/claude-opus-5-5", "router/gpt-6-astra"],
+      "members": ["router/example/claude-opus-5-5", "router/gpt-6-astra"],
       "affinity": { "mode": "session", "returnToPreferred": false }
     },
     {

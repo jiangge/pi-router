@@ -37,7 +37,7 @@ English | [简体中文](./README.zh-CN.md)
 `groups` adds entries such as `router/plan`, `router/execute`, and `router/review` alongside ordinary router models in `/model`. The complete example includes planning, execution, and review groups; the review group is for code review tasks and uses `example/codex-auto-review` and `example/gpt-6.1-sol` as members.
 
 ```json
-{"groups":[{"id":"plan","members":["router/lucky-php/claude-opus-5-5","router/gpt-6-astra"]}]}
+{"groups":[{"id":"plan","members":["router/example/claude-opus-5-5","router/gpt-6-astra"]}]}
 ```
 
 Members must **exactly** match existing `models[].id` after `router/`; no short-name resolution, direct providers, nested groups, `router/auto`, or opaque magpie `group/`/`auto/` leaves. Group ids must be unique (lowercase letter followed by up to 63 lowercase letters/digits/`_`/`-`) and cannot collide with ordinary model ids or `auto`. Limits: 128 groups, 256 members per group.
@@ -48,7 +48,7 @@ One group request has a shared default budget of **4 attempts / 120000 ms**, con
 
 Groups advertise conservative common known capabilities, then check every actual route even when economic policy is off. Missing capability metadata prevents publication/admission; no provisional group defaults are invented. Context is not summarized or truncated. Paired tool history and foreign reasoning use known host adapter conversions; unknown custom APIs with foreign tool/thinking history are rejected. Oversized context requires explicit Pi compaction. Catalog zero costs are placeholders, not free-price assertions. Changes to selectable entries require `/reload` (request-time config edits are validated; invalid edits retain the last good config).
 
-See [complete example](./examples/router-groups.config.json). Its concrete upstream ids were verified in the local model directory, not probed for availability, quality, tools or price. Configure matching real providers and explicit member models before using it. Full/order wizards and saves preserve groups; sync retains referenced offline models and skips reserved group-name imports.
+See [complete example](./examples/router-groups.config.json). Its upstream ids use the full provider/model format (provider names are placeholders - substitute your own registered providers and models); they were not probed for availability, quality, tools or price. Configure matching real providers and explicit member models before using it. Full/order wizards and saves preserve groups; sync retains referenced offline models and skips reserved group-name imports.
 
 ## Quick Start
 
