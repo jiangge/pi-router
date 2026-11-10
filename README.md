@@ -34,7 +34,7 @@ English | [简体中文](./README.zh-CN.md)
 
 ## Named router groups
 
-`groups` adds entries such as `router/plan`, `router/execute`, and `router/review` alongside ordinary router models in `/model`. The complete example includes planning, execution, and review groups; the review group is for code review tasks and uses `api666-zzzcoding/codex-auto-review` and `api666-zzzcoding/gpt-6.1-sol` as members.
+`groups` adds entries such as `router/plan`, `router/execute`, and `router/review` alongside ordinary router models in `/model`. The complete example includes planning, execution, and review groups; the review group is for code review tasks and uses `example/codex-auto-review` and `example/gpt-6.1-sol` as members.
 
 ```json
 {"groups":[{"id":"plan","members":["router/lucky-php/claude-opus-5-5","router/gpt-6-astra"]}]}

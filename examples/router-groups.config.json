@@ -8,8 +8,8 @@
     { "id": "gpt-6-astra", "channels": ["pipi"] },
     { "id": "opencode/deepseek-v4.1-flash-free", "channels": ["magpie"] },
     { "id": "opencode/glm-5.3-flash-free", "channels": ["magpie"] },
-    { "id": "api666-zzzcoding/codex-auto-review", "channels": ["magpie"] },
-    { "id": "api666-zzzcoding/gpt-6.1-sol", "channels": ["magpie"] }
+    { "id": "example/codex-auto-review", "channels": ["magpie"] },
+    { "id": "example/gpt-6.1-sol", "channels": ["magpie"] }
   ],
   "groups": [
     {
@@ -27,7 +27,7 @@
     {
       "id": "review",
       "name": "审查组",
-      "members": ["router/api666-zzzcoding/codex-auto-review", "router/api666-zzzcoding/gpt-6.1-sol"],
+      "members": ["router/example/codex-auto-review", "router/example/gpt-6.1-sol"],
       "affinity": { "mode": "session", "returnToPreferred": false }
     }
   ]
