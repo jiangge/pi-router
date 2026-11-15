@@ -5,6 +5,16 @@ All notable changes to pi-router will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-11-15
+
+### Changed
+
+- Raise the per-group member limit from 256 to 1024, so one catch-all group can span a large local model registry without splitting.
+
+### Compatibility
+
+- Verified with Pi `1.5.2`: the full test suite (16 files, 235 tests), `typecheck`, `typecheck:pi` against the installed host, and `build` all pass.
+
 ## [0.6.1] - 2026-11-10
 
 ### Documentation
