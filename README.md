@@ -40,7 +40,7 @@ English | [简体中文](./README.zh-CN.md)
 {"groups":[{"id":"plan","members":["router/example/claude-opus-5-5","router/gpt-6-astra"]}]}
 ```
 
-Members must **exactly** match existing `models[].id` after `router/`; no short-name resolution, direct providers, nested groups, `router/auto`, or opaque magpie `group/`/`auto/` leaves. Group ids must be unique (lowercase letter followed by up to 63 lowercase letters/digits/`_`/`-`) and cannot collide with ordinary model ids or `auto`. Limits: 128 groups, 256 members per group.
+Members must **exactly** match existing `models[].id` after `router/`; no short-name resolution, direct providers, nested groups, `router/auto`, or opaque magpie `group/`/`auto/` leaves. Group ids must be unique (lowercase letter followed by up to 63 lowercase letters/digits/`_`/`-`) and cannot collide with ordinary model ids or `auto`. Limits: 128 groups, 1024 members per group.
 
 Groups exhaust each member's channels before moving to the next configured member, reuse channel economics/health, and **ignore member fallbackModels**. They never escape into auto or other groups. A successful member/route is pinned per group/session, independently of direct-model sticky state. Default affinity is `session, returnToPreferred=false`; use `turn, returnToPreferred=true` to recover configured order on the next user turn, not between tools. `/router reset plan` clears only that group's pin. Session navigation and changes to group/model definitions clear pins; nothing is persisted globally.
 

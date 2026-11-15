@@ -11,6 +11,12 @@ describe('exact group configuration', () => {
     validateGroups({}); validateGroups({ groups: [] });
     const c = valid(); c.groups.push({ id: 'review', members: c.groups[0].members }); validateGroups(c);
   });
+  it('allows up to 1024 members per group and rejects more', () => {
+    const models = Array.from({ length: 1025 }, (_, i) => ({ id: `vendor/m${i}`, channels: ['p'] }));
+    const members = models.map(m => `router/${m.id}`);
+    validateGroups({ models, groups: [{ id: 'all', members: members.slice(0, 1024) }] });
+    expect(() => validateGroups({ models, groups: [{ id: 'all', members }] })).toThrow(/groups\[0\]\.members/);
+  });
   it.each([
     ['wrong prefix', (c: any) => c.groups[0].members = ['rourter/vendor/full-model.v2']],
     ['provider member', (c: any) => c.groups[0].members = ['magpie/x']],

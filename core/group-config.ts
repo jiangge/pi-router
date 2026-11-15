@@ -42,7 +42,7 @@ export function validateGroups(config: { models?: any[]; groups?: RouterGroupCon
   });
   config.groups.forEach((group, i) => {
     const p = `groups[${i}]`;
-    if (!Array.isArray(group.members) || !group.members.length || group.members.length > 256) fail(`${p}.members`, 'expected 1–256 exact router references');
+    if (!Array.isArray(group.members) || !group.members.length || group.members.length > 1024) fail(`${p}.members`, 'expected 1-1024 exact router references');
     const seen = new Set<string>();
     group.members.forEach((member, j) => {
       const path = `${p}.members[${j}]`;
