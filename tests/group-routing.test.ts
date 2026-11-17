@@ -7,20 +7,21 @@ const group = {id:'plan',members:['router/first','router/second']};
 const config = () => ({ models:[{id:'first',channels:['p'],routes:[{channel:'p',model:'a'},{channel:'p',model:'b'}],fallbackModels:['outside']},{id:'second',channels:['p'],modelByChannel:{p:'c'}},{id:'outside',channels:['p'],modelByChannel:{p:'d'}}],groups:[group],failover:{cooldownMs:0} });
 let state: ReturnType<typeof __testCreateRouterState>;
 let calls: string[];
+let efforts: Array<{ model: string; reasoning: unknown }>;
 let behavior: (id:string, stream:any, model:any) => void;
 const message = (model:any, content:any[] = []) => ({ role:'assistant',content,api:model.api,provider:model.provider,model:model.id,usage:{input:0,output:1,cacheRead:0,cacheWrite:0,totalTokens:1,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:'stop',timestamp:Date.now() });
 const fail = (s:any,m:any) => {s.push({type:'error',reason:'error',error:{...message(m),stopReason:'error',errorMessage:'Connection error.'}});s.end();};
 const success = (s:any,m:any) => {s.push({type:'done',reason:'stop',message:message(m,[{type:'text',text:'ok'}])});s.end();};
 const map = () => buildModelMap(['a','b','c','d'].map(id => leaf(id)) as any);
-const run = async (g:any = group, c:any = config(), options?:any, context:any = {messages:[]}) => __testRunWithRouterState(state,async () => {
-  const events:any[]=[]; for await (const event of createGroupStream(g,context,options,c,map())) events.push(event);return events;
+const run = async (g:any = group, c:any = config(), options?:any, context:any = {messages:[]}, modelMap:any = map()) => __testRunWithRouterState(state,async () => {
+  const events:any[]=[]; for await (const event of createGroupStream(g,context,options,c,modelMap)) events.push(event);return events;
 });
 beforeEach(() => {
-  state = __testCreateRouterState(); calls=[]; behavior=(_id,s,m) => fail(s,m);
+  state = __testCreateRouterState(); calls=[]; efforts=[]; behavior=(_id,s,m) => fail(s,m);
   __testRunWithRouterState(state,() => __testSetCurrentModelRegistry({
     getApiKeyAndHeaders:async () => ({ok:true,apiKey:'actual-upstream-key'}),
     getProvider:() => ({streamSimple:(m:any,_c:any,o:any) => {
-      expect(o.apiKey).toBe('actual-upstream-key'); calls.push(m.id);
+      expect(o.apiKey).toBe('actual-upstream-key'); calls.push(m.id); efforts.push({ model: m.id, reasoning: o.reasoning });
       const s=createAssistantMessageEventStream(); queueMicrotask(() => behavior(m.id,s,m));return s;
     }}),
   }));
@@ -88,6 +89,39 @@ describe('bounded group orchestration', () => {
   });
   it('checks group capabilities even with economic policy disabled', async () => {
     const events=await run(group,config(),{}, {messages:[{role:'user',content:[{type:'image',data:'xx',mimeType:'image/png'}]}]});expect(calls).toEqual([]);expect(events.at(-1).error.errorMessage).toMatch(/image/);
+  });
+  it('uses native provider reasoning effort per object member on failover', async () => {
+    const g = { id: 'calibrated', members: [
+      { model: 'router/first', thinking: 'xhigh' },
+      { model: 'router/second', thinking: 'medium' },
+    ] };
+    const c: any = config(); c.groups = [g];
+    const thinkingModels = buildModelMap(['a', 'b', 'c', 'd'].map(id => ({ ...leaf(id), reasoning: true })) as any);
+    behavior = (id, stream, model) => id === 'c' ? success(stream, model) : fail(stream, model);
+    await run(g, c, { reasoning: 'low' }, { messages: [] }, thinkingModels);
+    expect(calls).toEqual(['a', 'b', 'c']);
+    expect(efforts).toEqual([
+      { model: 'a', reasoning: 'xhigh' },
+      { model: 'b', reasoning: 'xhigh' },
+      { model: 'c', reasoning: 'medium' },
+    ]);
+  });
+  it('leaves native reasoning unchanged for legacy string members and objects without thinking', async () => {
+    const g = { id: 'mixed', members: ['router/first', { model: 'router/second' }] };
+    const c: any = config(); c.groups = [g];
+    const thinkingModels = buildModelMap(['a', 'b', 'c', 'd'].map(id => ({ ...leaf(id), reasoning: true })) as any);
+    behavior = (id, stream, model) => id === 'c' ? success(stream, model) : fail(stream, model);
+    await run(g, c, { reasoning: 'high' }, { messages: [] }, thinkingModels);
+    expect(efforts).toEqual(['a', 'b', 'c'].map(model => ({ model, reasoning: 'high' })));
+  });
+  it('does not send a reasoning request to non-reasoning fallback candidates', async () => {
+    const g = { id: 'mixed', members: [{ model: 'router/first', thinking: 'high' }, { model: 'router/second', thinking: 'off' }] };
+    const c: any = config(); c.groups = [g];
+    await run(g, c, { reasoning: 'high' });
+    // First member is skipped because all of its physical models do not reason;
+    // second member explicitly requests off and can be attempted.
+    expect(calls).toEqual(['c']);
+    expect(efforts).toEqual([{ model: 'c', reasoning: undefined }]);
   });
   it('publishes groups alongside ordinary mirrors using conservative metadata', () => {
     const mirrors=createMirrorModels(config().models as any,map(),[group]);

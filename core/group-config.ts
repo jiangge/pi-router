@@ -2,10 +2,24 @@ import type { AffinityConfig } from './affinity.js';
 import type { FailoverBudgetConfig } from './failover-budget.js';
 import { getModelRouteEntries } from '../router-routes.js';
 
+/** Pi-native reasoning effort passed to the selected upstream streamSimple call. */
+export type GroupThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** Existing string members remain valid. Object members add an optional per-group effort. */
+export type RouterGroupMember = string | { model: string; thinking?: GroupThinkingLevel };
+
+export const groupMemberRef = (member: RouterGroupMember): string =>
+  typeof member === 'string' ? member : member.model;
+
+export const groupMemberThinking = (member: RouterGroupMember): GroupThinkingLevel | undefined =>
+  typeof member === 'string' ? undefined : member.thinking;
+
+const GROUP_THINKING_LEVELS: readonly string[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
 export type RouterGroupConfig = {
   id: string;
   name?: string;
-  members: string[];
+  members: RouterGroupMember[];
   affinity?: Omit<AffinityConfig, 'mode'> & { mode?: 'turn' | 'session' | 'cache-aware' };
   failoverBudget?: FailoverBudgetConfig;
 };
@@ -46,11 +60,17 @@ export function validateGroups(config: { models?: any[]; groups?: RouterGroupCon
     const seen = new Set<string>();
     group.members.forEach((member, j) => {
       const path = `${p}.members[${j}]`;
-      if (typeof member !== 'string' || !member.startsWith('router/')) fail(path, 'expected router/<exact configured model id>');
-      const id = member.slice(7);
+      if (typeof member !== 'string') {
+        keys(member, ['model', 'thinking'], path);
+        if (member.thinking !== undefined && !GROUP_THINKING_LEVELS.includes(member.thinking))
+          fail(`${path}.thinking`, 'expected off/minimal/low/medium/high/xhigh/max');
+      }
+      const ref = groupMemberRef(member);
+      if (typeof ref !== 'string' || !ref.startsWith('router/')) fail(path, 'expected router/<exact configured model id>');
+      const id = ref.slice(7);
       if (id === 'auto' || ids.has(id)) fail(path, 'auto and nested groups are forbidden');
       const model = models.get(id);
-      if (!model) fail(path, `no exact models[].id match for ${member}`);
+      if (!model) fail(path, `no exact models[].id match for ${ref}`);
       if (seen.has(id)) fail(path, 'duplicate member');
       seen.add(id);
       for (const route of getModelRouteEntries(model)) {

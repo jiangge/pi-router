@@ -179,7 +179,7 @@ import { RouteAffinity, type AffinityConfig } from './core/affinity.js';
 import { FailoverBudget, type FailoverBudgetConfig } from './core/failover-budget.js';
 import { classifyFailure, type FailureClassification } from './core/failure-classifier.js';
 
-import { validateGroups, groupBudget, type RouterGroupConfig } from './core/group-config.js';
+import { validateGroups, groupBudget, groupMemberRef, groupMemberThinking, type RouterGroupConfig, type GroupThinkingLevel } from './core/group-config.js';
 import { commonGroupCapabilities, groupContextIncompatibility } from './core/group-context.js';
 
 type RouterConfig = {
@@ -4066,7 +4066,7 @@ function createMirrorModels(
   
   for (const group of groups) {
     const leaves = group.members.flatMap(member => {
-      const model = configuredModels.find(m => m.id === member.slice(7));
+      const model = configuredModels.find(m => m.id === groupMemberRef(member).slice(7));
       return model ? getModelRouteEntries(model).flatMap(entry => {
         const route = resolveConfiguredRouteByEntry(model, entry, modelMap);
         return route ? [route.model] : [];
@@ -4845,24 +4845,27 @@ function createGroupStream(
     failoverBudget: groupBudget(config.failoverBudget, group.failoverBudget) };
   const routedOptions = applyRouterRequestOptions(options, requestConfig);
   getRequestBudget(stream, requestConfig);
-  const members = group.members.map(ref => config.models?.find(m => m.id === ref.slice(7))).filter((m): m is RouterModelConfig => !!m);
-  const preferredMember = members.find(m => m.id === pin.record?.modelId);
-  const ordered = preferredMember ? [preferredMember, ...members.filter(m => m !== preferredMember)] : members;
-  const candidates = ordered.flatMap(member => {
+  const members = group.members.flatMap(spec => {
+    const member = config.models?.find(m => m.id === groupMemberRef(spec).slice(7));
+    return member ? [{ member, thinking: groupMemberThinking(spec) }] : [];
+  });
+  const preferredMember = members.find(({ member }) => member.id === pin.record?.modelId);
+  const ordered = preferredMember ? [preferredMember, ...members.filter(item => item !== preferredMember)] : members;
+  const candidates = ordered.flatMap(({ member, thinking }) => {
     const routes = determineRouteOrder(member.id, { ...member, sticky: false }, requestConfig);
-    const pinned = member.id === preferredMember?.id ? routes.find(r => r.routeKey === pin.record?.routeKey) : undefined;
-    return (pinned ? [pinned, ...routes.filter(r => r !== pinned)] : routes).map(entry => ({ member, entry }));
+    const pinned = member.id === preferredMember?.member.id ? routes.find(r => r.routeKey === pin.record?.routeKey) : undefined;
+    return (pinned ? [pinned, ...routes.filter(r => r !== pinned)] : routes).map(entry => ({ member, entry, thinking }));
   });
   const explanations: string[] = [];
   const attempted: string[] = [];
   const seen = new Set<string>();
-  debugLog(`[pi-router] Group router/${group.id}: ${pin.reason}; members ${ordered.map(m => m.id).join(' → ')}`);
+  debugLog(`[pi-router] Group router/${group.id}: ${pin.reason}; members ${ordered.map(({ member }) => member.id).join(' → ')}`);
   const stop = (error: string, aborted = false) => {
     stream.push(createRouterErrorEvent(group.id, 'router', ROUTER_API, error, aborted ? 'aborted' : 'error'));
     stream.end();
   };
   (async () => {
-    for (const { member, entry } of candidates) {
+    for (const { member, entry, thinking } of candidates) {
       if (routedOptions?.signal?.aborted) { stop('Group request aborted', true); return; }
       const label = `router/${member.id}@${entry.routeKey}`;
       const route = resolveConfiguredRouteByEntry(member, entry, modelMap);
@@ -4873,11 +4876,14 @@ function createGroupStream(
       const identity = JSON.stringify([route.model.provider, route.model.id]);
       if (seen.has(identity)) { explanations.push(`${label}: duplicate upstream skipped`); debugLog(`[pi-router] Group ${group.id}: duplicate ${identity}`); continue; }
       seen.add(identity);
-      const reason = groupContextIncompatibility(route.model, context, routedOptions, estimateContextTokens(context) + Math.ceil(JSON.stringify(context.tools ?? []).length / 3));
+      // Explicit effort is per member, not inherited from the virtual group's
+      // thinking selector. No override means the existing request is untouched.
+      const candidateOptions = thinking === undefined ? routedOptions : { ...routedOptions, reasoning: thinking };
+      const reason = groupContextIncompatibility(route.model, context, candidateOptions, estimateContextTokens(context) + Math.ceil(JSON.stringify(context.tools ?? []).length / 3));
       if (reason) { explanations.push(`${label}: ${reason}`); debugLog(`[pi-router] Group ${group.id}: skip ${label}: ${reason}`); continue; }
       const result = await executeRouteAttempt({
         stateModelId: member.id, virtualModelId: group.id, modelConfig: member, route,
-        context: structuredClone(context), options: routedOptions, config: requestConfig, outputStream: stream,
+        context: structuredClone(context), options: candidateOptions, config: requestConfig, outputStream: stream,
         onAdmitted: () => {
           attempted.push(label);
           debugLog(`[pi-router] Group ${group.id}: trying ${label} → ${route.model.provider}/${route.model.id}`);
