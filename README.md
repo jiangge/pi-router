@@ -40,7 +40,44 @@ English | [简体中文](./README.zh-CN.md)
 {"groups":[{"id":"plan","members":["router/example/claude-opus-5-5","router/gpt-6-astra"]}]}
 ```
 
-Members must **exactly** match existing `models[].id` after `router/`; no short-name resolution, direct providers, nested groups, `router/auto`, or opaque magpie `group/`/`auto/` leaves. Group ids must be unique (lowercase letter followed by up to 63 lowercase letters/digits/`_`/`-`) and cannot collide with ordinary model ids or `auto`. Limits: 128 groups, 1024 members per group.
+Members must **exactly** match existing `models[].id` after `router/`; no short-name resolution, direct providers, nested groups, `router/auto`, or opaque magpie `group/`/`auto/` leaves.
+
+### Optional per-member thinking effort
+
+Groups may now use either the original string member format or an object with a `model` reference and a `thinking` level. Both can be mixed freely. Existing configurations without member-specific thinking are unaffected.
+
+```json
+{
+  "models": [
+    { "id": "sol", "channels": ["openai-codex"], "modelByChannel": { "openai-codex": "YOUR_SOL_ID" } },
+    { "id": "opus", "channels": ["anthropic"], "modelByChannel": { "anthropic": "YOUR_OPUS_ID" } },
+    { "id": "terra", "channels": ["openai-codex"], "modelByChannel": { "openai-codex": "YOUR_TERRA_ID" } }
+  ],
+  "groups": [
+    {
+      "id": "coding-high",
+      "members": [
+        { "model": "router/sol", "thinking": "xhigh" },
+        { "model": "router/opus", "thinking": "high" },
+        { "model": "router/terra", "thinking": "max" }
+      ]
+    },
+    {
+      "id": "coding-low",
+      "members": [
+        { "model": "router/sol", "thinking": "medium" },
+        "router/terra"
+      ]
+    }
+  ]
+}
+```
+
+Select `router/coding-high` or `router/coding-low` as the Pi model. The group names are ordinary virtual model IDs, **not** Pi's `:high` thinking suffix. Each object member's optional `thinking` overrides the incoming Pi request's native `reasoning` value **only when that member is attempted**. Supported levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The chosen value is passed unchanged through Pi's upstream provider adapter, which performs model-specific translation. A missing override inherits the ordinary Pi-selected level. No custom token budget or provider-specific effort mapping is introduced.
+
+For the configured effort to work, the underlying provider/model must support that Pi thinking level. Non-reasoning models cannot be used with a non-`off` effort; incompatible candidates are skipped by the existing group capability checks. `max` may not be available on some Pi/model versions. The group's published thinking selector remains conservative and is not a per-member override: set thinking on the member itself for reliable cross-model performance pools.
+
+ Group ids must be unique (lowercase letter followed by up to 63 lowercase letters/digits/`_`/`-`) and cannot collide with ordinary model ids or `auto`. Limits: 128 groups, 1024 members per group.
 
 Groups exhaust each member's channels before moving to the next configured member, reuse channel economics/health, and **ignore member fallbackModels**. They never escape into auto or other groups. A successful member/route is pinned per group/session, independently of direct-model sticky state. Default affinity is `session, returnToPreferred=false`; use `turn, returnToPreferred=true` to recover configured order on the next user turn, not between tools. `/router reset plan` clears only that group's pin. Session navigation and changes to group/model definitions clear pins; nothing is persisted globally.
 
