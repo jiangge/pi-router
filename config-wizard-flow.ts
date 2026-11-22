@@ -334,7 +334,7 @@ export async function runConfigWizard(
     }
     
     // Group references and their explicit routes survive rediscovery, even offline.
-    const references = new Set(existingConfig.groups?.flatMap(g => g.members.map(m => m.slice(7))) ?? []);
+    const references = new Set(existingConfig.groups?.flatMap(g => g.members.map(m => (typeof m === 'string' ? m : m.model).slice(7))) ?? []);
     const reserved = new Set(existingConfig.groups?.map(g => g.id) ?? []);
     finalConfig.models = [
       ...(finalConfig.models ?? []).filter(m => !references.has(m.id) && !reserved.has(m.id)),

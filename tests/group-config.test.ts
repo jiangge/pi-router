@@ -35,6 +35,45 @@ describe('exact group configuration', () => {
     ['infinite budget', (c: any) => c.groups[0].failoverBudget = {maxTotalWaitMs:Infinity}],
     ['opaque leaf', (c: any) => c.models[0] = {id:c.models[0].id,channels:['magpie'],modelByChannel:{magpie:'group/auto-x'}}],
   ])('rejects %s', (_name, mutate) => { const c = valid(); mutate(c); expect(() => validateGroups(c)).toThrow(/groups|models/); });
+  it('accepts optional per-member Pi thinking levels while preserving string members', () => {
+    const c: any = valid();
+    c.groups[0].members = [{ model: 'router/vendor/full-model.v2', thinking: 'xhigh' }];
+    validateGroups(c);
+    for (const thinking of ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+      c.groups[0].members[0].thinking = thinking;
+      expect(() => validateGroups(c)).not.toThrow();
+    }
+    delete c.groups[0].members[0].thinking;
+    expect(() => validateGroups(c)).not.toThrow();
+    c.groups[0].members = ['router/vendor/full-model.v2'];
+    expect(() => validateGroups(c)).not.toThrow();
+  });
+  it('rejects invalid member objects without relaxing exact identity or duplicate rules', () => {
+    for (const member of [
+      { model: 'router/vendor/full-model.v2', thinking: 'ultra' },
+      { model: 'router/vendor/full-model.v2', thinking: 12 },
+      { model: 'router/vendor/full-model.v2', unexpected: true },
+      { model: 'vendor/full-model.v2', thinking: 'high' },
+      { thinking: 'high' },
+      null,
+    ]) {
+      const c: any = valid();
+      c.groups[0].members = [member];
+      expect(() => validateGroups(c)).toThrow(/groups\[0\]\.members/);
+    }
+    const c: any = valid();
+    c.groups[0].members.push({ model: 'router/vendor/full-model.v2', thinking: 'low' });
+    expect(() => validateGroups(c)).toThrow(/duplicate member/);
+  });
+  it('round-trips object members when saving a configuration', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'group-thinking-config-')); __testSetPiConfigDir(dir);
+    try {
+      const c: any = valid();
+      c.groups[0].members = [{ model: 'router/vendor/full-model.v2', thinking: 'max' }];
+      __testSaveConfig(c);
+      expect(JSON.parse(readFileSync(join(dir, 'pi-router.json'), 'utf8')).groups).toEqual(c.groups);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
   it('uses bounded defaults and stricter global/local dimensions', () => {
     expect(groupBudget()).toMatchObject({maxAttempts:4,maxTotalWaitMs:120000});
     expect(groupBudget({maxAttempts:2,maxTotalWaitMs:90000},{maxAttempts:8,maxTotalWaitMs:50000})).toMatchObject({maxAttempts:2,maxTotalWaitMs:50000});
