@@ -2,6 +2,8 @@
 
 Intelligent routing layer for pi (coding agent) with multi-level failover and observability.
 
+[![CI](https://github.com/jiangge/pi-router/actions/workflows/ci.yml/badge.svg)](https://github.com/jiangge/pi-router/actions/workflows/ci.yml) [![npm version](https://img.shields.io/npm/v/pi-router)](https://www.npmjs.com/package/pi-router) [![npm downloads](https://img.shields.io/npm/dm/pi-router)](https://www.npmjs.com/package/pi-router) [![license](https://img.shields.io/npm/l/pi-router)](./LICENSE)
+
 English | [简体中文](./README.zh-CN.md)
 
 ## Table of Contents

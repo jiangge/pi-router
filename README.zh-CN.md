@@ -2,6 +2,8 @@
 
 Pi 的智能路由层，提供多级故障转移与可观测性。
 
+[![CI](https://github.com/jiangge/pi-router/actions/workflows/ci.yml/badge.svg)](https://github.com/jiangge/pi-router/actions/workflows/ci.yml) [![npm version](https://img.shields.io/npm/v/pi-router)](https://www.npmjs.com/package/pi-router) [![npm downloads](https://img.shields.io/npm/dm/pi-router)](https://www.npmjs.com/package/pi-router) [![license](https://img.shields.io/npm/l/pi-router)](./LICENSE)
+
 [English](./README.md) | 简体中文
 
 ## 目录
