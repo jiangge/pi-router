@@ -3,7 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FlatOrderEditor } from '../config-wizard-flat.js';
-import { buildEditableModelsFromConfig, hasExistingRouterModelConfig, runConfigOrderWizard, runConfigWizard } from '../config-wizard-flow.js';
+import { buildEditableModelsFromConfig, buildWizardGroup, groupToWizardPicks, hasExistingRouterModelConfig, runConfigOrderWizard, runConfigWizard, validateWizardGroupId, wizardPickToMember } from '../config-wizard-flow.js';
+import { validateGroups } from '../core/group-config.js';
 import { TwoTierOrderEditor } from '../config-wizard-two-tier.js';
 import { ChannelOrderEditor, createStepComponent } from '../config-wizard-ui.js';
 import { scanAndClassifyChannels, smartSortChannels } from '../config-wizard.js';
@@ -159,7 +160,7 @@ function createInteractiveCtx(scripts: string[][]) {
 
 describe('config order adjustment helpers', () => {
   it('preserves groups, referenced full model mappings and advanced settings through the full wizard', async () => {
-    const ctx = createQueuedCtx(['channelFirst','manual','true','disabled','true',[{id:'plan',channels:['a','b']},{id:'new-model',channels:['a','b']}]]);
+    const ctx = createQueuedCtx(['channelFirst','manual','true','disabled','true',[{id:'plan',channels:['a','b']},{id:'new-model',channels:['a','b']}],'__keep']);
     const original = { groups:[{id:'plan',members:['router/vendor/full.id']}], models:[{id:'vendor/full.id',channels:['offline'],modelByChannel:{offline:'concrete/upstream'}}], request:{maxTokens:2000} };
     let saved:any;
     await runConfigWizard(ctx, () => [{id:'new-model',provider:'a'},{id:'new-model',provider:'b'}], groupByModel, c => {saved=c;}, () => 'hash', () => '/tmp/models.json', original as any);
@@ -184,6 +185,7 @@ describe('config order adjustment helpers', () => {
       [key.enter],
       [key.enter],
       [key.down, key.enter, key.up, key.enter, 'c'],
+      [key.down, key.enter],
     ]);
     let savedConfig: any;
 
@@ -220,6 +222,7 @@ describe('config order adjustment helpers', () => {
       'disabled',
       'true',
       ['m1@b', 'm1@a'],
+      '__none',
     ]);
     let savedConfig: any;
 
@@ -686,7 +689,7 @@ describe('config order adjustment helpers', () => {
 
     editor.handleInput('c');
     expect(completed).toBe(true);
-    expect(editor.render(80).join('\n')).toContain('Step 6/6');
+    expect(editor.render(80).join('\n')).toContain('Step 6/7');
     expect(editor.getResult()).toEqual([{ id: 'gpt-5.5', channels: ['xiaojimao', 'pipi'] }]);
   });
 
@@ -911,5 +914,82 @@ describe('config order adjustment helpers', () => {
     expect(selected).toEqual(['channelFirst']);
     expect(cancelled).toBe(true);
     expect(container.render(80).join('\n')).toContain('Choose Routing Strategy');
+  });
+});
+
+describe('config wizard group helpers', () => {
+  it('validates new group ids against the wizard rules', () => {
+    const models = new Set(['sol', 'opus']);
+    const taken = new Set(['plan']);
+    expect(validateWizardGroupId('coding-high', taken, models)).toBeNull();
+    expect(validateWizardGroupId('Plan', taken, models)).toMatch(/lowercase/);
+    expect(validateWizardGroupId('auto', taken, models)).toMatch(/reserved/);
+    expect(validateWizardGroupId('sol', taken, models)).toMatch(/already a model id/);
+    expect(validateWizardGroupId('plan', taken, models)).toMatch(/already exists/);
+    expect(validateWizardGroupId('a'.repeat(65), taken, models)).toMatch(/lowercase/);
+    expect(validateWizardGroupId('', taken, models)).toMatch(/lowercase/);
+  });
+
+  it('serializes picks to string or object members', () => {
+    expect(wizardPickToMember({ modelId: 'sol' })).toBe('router/sol');
+    expect(wizardPickToMember({ modelId: 'opus', thinking: 'high' })).toEqual({ model: 'router/opus', thinking: 'high' });
+  });
+
+  it('round-trips groups through wizard picks', () => {
+    const group: any = { id: 'plan', members: ['router/sol', { model: 'router/opus', thinking: 'xhigh' }] };
+    const picks = groupToWizardPicks(group);
+    expect(picks).toEqual([{ modelId: 'sol' }, { modelId: 'opus', thinking: 'xhigh' }]);
+    expect(buildWizardGroup('plan', picks)).toEqual(group);
+  });
+
+  it('builds groups that pass validateGroups', () => {
+    const config: any = {
+      models: [
+        { id: 'vendor/full-model.v2', channels: ['p'] },
+        { id: 'vendor/other-model', channels: ['p'] },
+      ],
+      groups: [buildWizardGroup('plan', [
+        { modelId: 'vendor/full-model.v2', thinking: 'xhigh' },
+        { modelId: 'vendor/other-model' },
+      ])],
+    };
+    expect(() => validateGroups(config)).not.toThrow();
+  });
+});
+
+describe('config wizard group step (interactive)', () => {
+  it('creates a group with a per-member thinking override through the full wizard', async () => {
+    const ctx = createInteractiveCtx([
+      [key.enter], // Step 1: channelFirst
+      [key.enter], // Step 2: latency
+      [key.enter], // Step 3: auto-sync on
+      [key.enter], // Step 4: health probe disabled
+      [key.enter], // Step 5: sticky on
+      ['c'], // Step 6: accept the discovered order
+      [key.enter], // Step 7: Create groups
+      [key.enter], // Groups menu: Add a new group (id comes from ui.input)
+      [key.enter], // Members menu: Add a member
+      [key.enter], // Pick m1
+      [key.down, key.down, key.down, key.down, key.down, key.enter], // Thinking: high
+      [key.down, key.down, key.down, key.enter], // Members menu: Done
+      [key.down, key.down, key.enter], // Groups menu: Done
+    ]);
+    (ctx.ui as any).input = async () => 'plan';
+    let savedConfig: any;
+    await runConfigWizard(
+      ctx,
+      () => [
+        { id: 'm1', provider: 'a', baseUrl: 'https://a.example/v1' },
+        { id: 'm1', provider: 'b', baseUrl: 'https://b.example/v1' },
+      ],
+      groupByModel,
+      (config) => { savedConfig = config; },
+      () => 'models-hash',
+      () => '/tmp/models.json',
+    );
+    expect(savedConfig.groups).toEqual([
+      { id: 'plan', members: [{ model: 'router/m1', thinking: 'high' }] },
+    ]);
+    expect(ctx.notifications.at(-1)?.message).toContain('Configuration Complete');
   });
 });

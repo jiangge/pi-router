@@ -206,7 +206,7 @@ export class ChannelOrderEditor implements Component {
     const lines: string[] = [];
     
     // Title
-    lines.push(this.theme.fg("accent", this.theme.bold("Step 6/6: Adjust Channel Order")));
+    lines.push(this.theme.fg("accent", this.theme.bold("Step 6/7: Adjust Channel Order")));
     lines.push("");
     
     // Current model/channel info

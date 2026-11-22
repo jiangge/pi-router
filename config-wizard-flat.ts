@@ -257,7 +257,7 @@ export class FlatOrderEditor implements Component {
 
     const lines: string[] = [];
 
-    lines.push(this.theme.fg("accent", this.theme.bold("Step 6/6: Adjust Order (Custom Mode)")));
+    lines.push(this.theme.fg("accent", this.theme.bold("Step 6/7: Adjust Order (Custom Mode)")));
     lines.push("");
     if (this.items.length === 0) {
       lines.push(this.theme.fg("dim", "No model/channel pairs remaining"));
