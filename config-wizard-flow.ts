@@ -433,7 +433,7 @@ async function wizardSelect(ctx: any, title: string, items: SelectItem[]): Promi
   return typeof result === "string" ? result : null;
 }
 
-async function pickThinking(ctx: any, modelId: string, current?: GroupThinkingLevel): Promise<GroupThinkingLevel | undefined> {
+async function pickThinking(ctx: any, modelId: string, current?: GroupThinkingLevel): Promise<GroupThinkingLevel | undefined | null> {
   const items: SelectItem[] = [
     {
       value: "__inherit",
@@ -448,7 +448,8 @@ async function pickThinking(ctx: any, modelId: string, current?: GroupThinkingLe
   ];
 
   const result = await wizardSelect(ctx, `Thinking effort for ${modelId}`, items);
-  if (result === null || result === "__inherit") return undefined;
+  if (result === null) return null; // Cancelled: caller leaves the member unchanged
+  if (result === "__inherit") return undefined;
   return result as GroupThinkingLevel;
 }
 
@@ -529,6 +530,7 @@ async function editGroupMembers(
       const entry = working.find(p => p.modelId === picked);
       if (!entry) continue;
       const thinking = await pickThinking(ctx, picked, entry.thinking);
+      if (thinking === null) continue;
       if (thinking) entry.thinking = thinking;
       else delete entry.thinking;
     }
@@ -592,7 +594,7 @@ async function editGroups(
     if (!group) continue;
     const action = await wizardSelect(ctx, `router/${id}`, [
       { value: "__members", label: "Edit members", description: `${group.picks.length} member(s)` },
-      { value: "__delete", label: "Delete this group", description: "Remove the group; the models stay configured" },
+      { value: "__delete", label: "Delete this group", description: "Remove this group from the configuration" },
       { value: "__back", label: "Back", description: "Return to the group list" }
     ]);
     if (action === "__members") {
@@ -688,6 +690,7 @@ export async function runConfigOrderWizard(
     sortBy,
     strategy,
     customRoutesToInitialOrder(config.customRoutes, config.customOrder, editableModels),
+    "",
   );
   if (!orderResult) return;
 
@@ -936,14 +939,15 @@ async function runStep6AdjustOrder(
   models: Array<{ id: string; channels: ChannelScore[] }>,
   sortBy: string,
   strategy: "channelFirst" | "custom",
-  initialCustomOrder?: string[]
+  initialCustomOrder?: string[],
+  stepPrefix: string = "Step 6/7"
 ): Promise<Array<{ id: string; channels: string[] }> | string[] | null> {
 
   if (strategy === "channelFirst") {
     // channelFirst: Two-tier editor (model order + channel order per model)
     return await ctx.ui.custom(
       (tui: any, theme: any, _kb: any, done: any) => {
-        const editor = new TwoTierOrderEditor(models, theme);
+        const editor = new TwoTierOrderEditor(models, theme, stepPrefix);
 
         editor.onSkip = () => {
           // Skip adjustment, use smart sorted order
@@ -966,7 +970,7 @@ async function runStep6AdjustOrder(
     // custom: Flat editor (all model@channel pairs in one list)
     return await ctx.ui.custom(
       (tui: any, theme: any, _kb: any, done: any) => {
-        const editor = new FlatOrderEditor(models, theme, initialCustomOrder);
+        const editor = new FlatOrderEditor(models, theme, initialCustomOrder, stepPrefix);
 
         editor.onSkip = () => {
           // Skip adjustment, use initial order (modelFirst logic)

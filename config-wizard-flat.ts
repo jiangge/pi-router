@@ -46,7 +46,8 @@ export class FlatOrderEditor implements Component {
       channels: ChannelScore[];
     }>,
     private theme: any,
-    initialOrder?: string[]  // Optional initial customOrder
+    initialOrder?: string[],  // Optional initial customOrder
+    private stepPrefix: string = "Step 6/7"
   ) {
     // Build flat list from models
     this.items = [];
@@ -257,7 +258,7 @@ export class FlatOrderEditor implements Component {
 
     const lines: string[] = [];
 
-    lines.push(this.theme.fg("accent", this.theme.bold("Step 6/7: Adjust Order (Custom Mode)")));
+    lines.push(this.theme.fg("accent", this.theme.bold(`${this.stepPrefix ? `${this.stepPrefix}: ` : ""}Adjust Order (Custom Mode)`)));
     lines.push("");
     if (this.items.length === 0) {
       lines.push(this.theme.fg("dim", "No model/channel pairs remaining"));

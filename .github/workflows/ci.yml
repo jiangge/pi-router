@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Install Pi host (peer packages for typecheck:pi and Pi-host tests)
-        run: npm install --global @earendil-works/pi-coding-agent@latest
+        run: npm install --global @earendil-works/pi-coding-agent@1.6.0
       - name: Typecheck
         run: npm run typecheck
       - name: Typecheck against installed Pi

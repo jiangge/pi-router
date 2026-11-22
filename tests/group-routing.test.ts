@@ -114,6 +114,15 @@ describe('bounded group orchestration', () => {
     await run(g, c, { reasoning: 'high' }, { messages: [] }, thinkingModels);
     expect(efforts).toEqual(['a', 'b', 'c'].map(model => ({ model, reasoning: 'high' })));
   });
+  it('sends no reasoning field for a member with thinking off on reasoning models', async () => {
+    const g = { id: 'offtest', members: [{ model: 'router/first', thinking: 'off' }] };
+    const c: any = config(); c.groups = [g];
+    const thinkingModels = buildModelMap(['a', 'b', 'c', 'd'].map(id => ({ ...leaf(id), reasoning: true })) as any);
+    behavior = (id, stream, model) => success(stream, model);
+    await run(g, c, { reasoning: 'high' }, { messages: [] }, thinkingModels);
+    expect(calls).toEqual(['a']);
+    expect(efforts).toEqual([{ model: 'a', reasoning: undefined }]);
+  });
   it('does not send a reasoning request to non-reasoning fallback candidates', async () => {
     const g = { id: 'mixed', members: [{ model: 'router/first', thinking: 'high' }, { model: 'router/second', thinking: 'off' }] };
     const c: any = config(); c.groups = [g];

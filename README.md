@@ -81,7 +81,7 @@ For the configured effort to work, the underlying provider/model must support th
 
 Groups can also be created and edited interactively, without editing JSON: run `/router config wizard` and use **Step 7: Model Groups** to add groups, order their members, and set optional per-member thinking.
 
- Group ids must be unique (lowercase letter followed by up to 63 lowercase letters/digits/`_`/`-`) and cannot collide with ordinary model ids or `auto`. Limits: 128 groups, 1024 members per group.
+Group ids must be unique (lowercase letter followed by up to 63 lowercase letters/digits/`_`/`-`) and cannot collide with ordinary model ids or `auto`. Limits: 128 groups, 1024 members per group.
 
 Groups exhaust each member's channels before moving to the next configured member, reuse channel economics/health, and **ignore member fallbackModels**. They never escape into auto or other groups. A successful member/route is pinned per group/session, independently of direct-model sticky state. Default affinity is `session, returnToPreferred=false`; use `turn, returnToPreferred=true` to recover configured order on the next user turn, not between tools. `/router reset plan` clears only that group's pin. Session navigation and changes to group/model definitions clear pins; nothing is persisted globally.
 

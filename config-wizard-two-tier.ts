@@ -63,7 +63,8 @@ export class TwoTierOrderEditor implements Component {
       id: string;
       channels: ChannelScore[];
     }>,
-    private theme: any
+    private theme: any,
+    private stepPrefix: string = "Step 6/7"
   ) {
     this.models = models.map(m => ({
       id: m.id,
@@ -388,7 +389,7 @@ export class TwoTierOrderEditor implements Component {
   }
 
   private renderModelMode(lines: string[], _width: number): void {
-    lines.push(this.theme.fg("accent", this.theme.bold("Step 6/7: Adjust Order (Layer 1: Model Order)")));
+    lines.push(this.theme.fg("accent", this.theme.bold(`${this.stepPrefix ? `${this.stepPrefix}: ` : ""}Adjust Order (Layer 1: Model Order)`)));
     lines.push("");
     if (this.models.length === 0) {
       lines.push(this.theme.fg("dim", "No models remaining"));
@@ -472,7 +473,7 @@ export class TwoTierOrderEditor implements Component {
   }
 
   private renderChannelMode(lines: string[], _width: number): void {
-    lines.push(this.theme.fg("accent", this.theme.bold("Step 6/7: Adjust Order (Layer 2: Channel Order)")));
+    lines.push(this.theme.fg("accent", this.theme.bold(`${this.stepPrefix ? `${this.stepPrefix}: ` : ""}Adjust Order (Layer 2: Channel Order)`)));
     lines.push("");
 
     // Current model info

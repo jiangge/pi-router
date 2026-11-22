@@ -4878,7 +4878,13 @@ function createGroupStream(
       seen.add(identity);
       // Explicit effort is per member, not inherited from the virtual group's
       // thinking selector. No override means the existing request is untouched.
-      const candidateOptions = thinking === undefined ? routedOptions : { ...routedOptions, reasoning: thinking };
+      const candidateOptions = thinking === undefined
+        ? routedOptions
+        : thinking === "off"
+          // Pi's contract: "off" is the ABSENCE of reasoning. Passing "off"
+          // verbatim would enable thinking in the Anthropic/Bedrock adapters.
+          ? { ...routedOptions, reasoning: undefined }
+          : { ...routedOptions, reasoning: thinking };
       const reason = groupContextIncompatibility(route.model, context, candidateOptions, estimateContextTokens(context) + Math.ceil(JSON.stringify(context.tools ?? []).length / 3));
       if (reason) { explanations.push(`${label}: ${reason}`); debugLog(`[pi-router] Group ${group.id}: skip ${label}: ${reason}`); continue; }
       const result = await executeRouteAttempt({
